@@ -111,7 +111,7 @@ func LoadConfig() {
 		Port: getEnvString("PORT", "8000"),
 
 		// API Configuration
-		APIEndpoint:  getEnvString("API_ENDPOINT", "https://chat.z.ai/api/chat/completions"),
+		APIEndpoint:  getEnvString("API_ENDPOINT", "https://chat.z.ai/api/v2/chat/completions"),
 		AuthTokens:   getEnvStringSlice("AUTH_TOKEN"),
 		BackupTokens: getEnvStringSlice("BACKUP_TOKEN"),
 
