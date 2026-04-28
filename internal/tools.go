@@ -31,9 +31,11 @@ type ToolCallFunction struct {
 }
 
 var (
-	toolCallFencePattern = regexp.MustCompile("(?s)```json\\s*(\\{.*?\\})\\s*```")
-	functionCallPattern  = regexp.MustCompile(`(?s)调用函数\s*[：:]\s*([\w\-\.]+)\s*(?:参数|arguments)[：:]\s*(\{.*?\})`)
-	callIDCounter        int64
+	toolCallFencePattern     = regexp.MustCompile("(?s)```(?:json)?\\s*(\\{.*?\\}|\\[.*?\\])\\s*```")
+	functionCallPattern      = regexp.MustCompile(`(?s)调用函数\s*[：:]\s*([\w\-\.]+)\s*(?:参数|arguments)[：:]\s*(\{.*?\})`)
+	functionInvokePattern    = regexp.MustCompile(`(?s)\b([\w\-\.]+)\s*\(\s*(\{.*?\})\s*\)`)
+	toolTaggedPayloadPattern = regexp.MustCompile(`(?is)<(?:tool_call|function_call)\)?\s*>(.*?)</(?:tool_call|function_call)\)?\s*>`)
+	callIDCounter            int64
 )
 
 func GenerateToolPrompt(tools []Tool, toolChoice interface{}) string {
@@ -98,38 +100,57 @@ func GenerateToolPrompt(tools []Tool, toolChoice interface{}) string {
 }
 
 func getToolChoiceInstructions(toolChoice interface{}, toolNames []string) string {
-	baseInstructions := `# 工具调用格式
-当需要调用工具时，请严格按照以下 JSON 格式输出：
-` + "```json" + `
+	allowedTools := strings.Join(toolNames, ", ")
+	baseInstructions := fmt.Sprintf(`# 工具调用格式
+你当前请求中唯一允许使用的函数工具是：%s
+这些工具由调用方显式提供，必须视为真实可用。
+不要声称“没有这个工具”，不要改用你自己的内置工具，也不要改写函数名。
+
+当需要调用工具时，优先输出以下 OpenAI 兼容 JSON：
+`+"```json"+`
 {"tool_calls":[{"id":"call_1","type":"function","function":{"name":"函数名","arguments":"{\"参数名\":\"参数值\"}"}}]}
-` + "```" + `
+`+"```"+`
+
+也兼容以下次选格式，但只有在你无法稳定输出首选格式时才使用：
+`+"```json"+`
+{"name":"函数名","arguments":{"参数名":"参数值"}}
+`+"```"+`
+或：
+`+"```xml"+`
+<tool_call>{"name":"函数名","arguments":{"参数名":"参数值"}}</tool_call>
+`+"```"+`
+
 **重要规则：**
-1. arguments 字段必须是 JSON 字符串（双引号包裹），不是对象
-2. 调用工具时只输出 JSON，不要添加任何解释文字
-3. 可以在 tool_calls 数组中同时调用多个工具
+1. 首选输出必须是纯 JSON，不要添加解释文字
+2. tool_calls[].function.arguments 必须是 JSON 字符串，不是对象
+3. 只能调用上面列出的函数名，不能改名，不能替换成别的工具
+4. 如果用户要求使用工具或 tool_choice 有要求，你必须先调用工具，不能先解释为什么不能调用
+5. 即使信息不完整，也要先依据已有上下文构造最合理的参数发起调用
+6. 可以同时调用多个工具，但只有在任务确实需要时才这么做
+7. 如果已经收到工具结果，必须直接根据结果回答，不能重复调用工具
 
 # 工具结果处理
 当你看到以 "[已执行工具调用]" 开头的助手消息和以 "[工具返回结果]" 开头的用户消息时，说明工具已经被调用并返回了结果。
-**此时你必须直接使用工具返回的数据来回答用户，绝对不要再次调用工具。**`
+**此时你必须直接使用工具返回的数据来回答用户，绝对不要再次调用工具。**`, allowedTools)
 
 	switch tc := toolChoice.(type) {
 	case string:
 		if tc == "auto" {
-			return baseInstructions + "\n4. 根据用户需求自行判断是否需要调用工具"
+			return baseInstructions + "\n8. 根据用户需求自行判断是否需要调用工具。"
 		} else if tc == "required" {
-			return baseInstructions + "\n4. **必须**调用至少一个工具来响应用户请求"
+			return baseInstructions + "\n8. **必须**调用至少一个工具来响应用户请求。"
 		}
 	case map[string]interface{}:
 		if tc["type"] == "function" {
 			if fn, ok := tc["function"].(map[string]interface{}); ok {
 				if name, ok := fn["name"].(string); ok {
-					return baseInstructions + fmt.Sprintf("\n4. **必须**调用 `%s` 工具来响应用户请求", name)
+					return baseInstructions + fmt.Sprintf("\n8. **必须**调用 `%s` 工具来响应用户请求。", name)
 				}
 			}
 		}
 	}
 
-	return baseInstructions + "\n4. 根据用户需求自行判断是否需要调用工具"
+	return baseInstructions + "\n8. 根据用户需求自行判断是否需要调用工具。"
 }
 
 func ProcessMessagesWithTools(messages []Message, tools []Tool, toolChoice interface{}) []Message {
@@ -292,12 +313,10 @@ func normalizeArguments(args interface{}) string {
 		if v == "" {
 			return "{}"
 		}
-		// 验证是否为合法 JSON
 		var check json.RawMessage
 		if json.Unmarshal([]byte(v), &check) == nil {
 			return v
 		}
-		// 尝试修复常见的格式问题（单引号 -> 双引号）
 		fixed := strings.ReplaceAll(v, "'", "\"")
 		if json.Unmarshal([]byte(fixed), &check) == nil {
 			return fixed
@@ -342,19 +361,106 @@ func validateAndNormalizeCalls(calls []ToolCall) []ToolCall {
 	return valid
 }
 
+func parseNamedFunctionObject(jsonStr string) []ToolCall {
+	var raw struct {
+		ID        string      `json:"id"`
+		Type      string      `json:"type"`
+		Name      string      `json:"name"`
+		Arguments interface{} `json:"arguments"`
+		Tool      string      `json:"tool"`
+		Args      interface{} `json:"args"`
+		Input     interface{} `json:"input"`
+		Function  *struct {
+			Name      string      `json:"name"`
+			Arguments interface{} `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &raw); err != nil {
+		return nil
+	}
+
+	name := raw.Name
+	args := raw.Arguments
+	if raw.Function != nil {
+		if name == "" {
+			name = raw.Function.Name
+		}
+		if args == nil {
+			args = raw.Function.Arguments
+		}
+	}
+	if name == "" && raw.Tool != "" {
+		name = raw.Tool
+	}
+	if args == nil && raw.Args != nil {
+		args = raw.Args
+	}
+	if args == nil && raw.Input != nil {
+		args = raw.Input
+	}
+	if name == "" {
+		return nil
+	}
+	return []ToolCall{{
+		ID:   raw.ID,
+		Type: raw.Type,
+		Function: ToolCallFunction{
+			Name:      name,
+			Arguments: normalizeArguments(args),
+		},
+	}}
+}
+
+func parseTaggedToolPayload(text string) []ToolCall {
+	matches := toolTaggedPayloadPattern.FindAllStringSubmatch(text, -1)
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		payload := strings.TrimSpace(match[1])
+		if calls := parseToolCallsJSON(payload); calls != nil {
+			return calls
+		}
+		if calls := parseNamedFunctionObject(payload); calls != nil {
+			return calls
+		}
+	}
+	return nil
+}
+
+func parseFunctionInvocation(text string) []ToolCall {
+	matches := functionInvokePattern.FindAllStringSubmatch(text, -1)
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		name := strings.TrimSpace(match[1])
+		args := strings.TrimSpace(match[2])
+		var check json.RawMessage
+		if name != "" && json.Unmarshal([]byte(args), &check) == nil {
+			return []ToolCall{{
+				Type: "function",
+				Function: ToolCallFunction{
+					Name:      name,
+					Arguments: args,
+				},
+			}}
+		}
+	}
+	return nil
+}
+
 // ExtractToolInvocations 从响应文本中提取工具调用
 func ExtractToolInvocations(text string) []ToolCall {
 	if text == "" {
 		return nil
 	}
 
-	// 限制扫描范围
 	scanText := text
 	if len(scanText) > Cfg.ScanLimit {
 		scanText = scanText[:Cfg.ScanLimit]
 	}
 
-	// 方法1: 从 JSON fence 中提取 ```json {...} ```
 	matches := toolCallFencePattern.FindAllStringSubmatch(scanText, -1)
 	for _, match := range matches {
 		if len(match) > 1 {
@@ -362,22 +468,33 @@ func ExtractToolInvocations(text string) []ToolCall {
 				LogDebug("[ExtractToolInvocations] Found %d tool calls in JSON fence", len(calls))
 				return validateAndNormalizeCalls(calls)
 			}
+			if calls := parseNamedFunctionObject(match[1]); calls != nil {
+				LogDebug("[ExtractToolInvocations] Found named function object in JSON fence")
+				return validateAndNormalizeCalls(calls)
+			}
 		}
 	}
 
-	// 方法2: 提取内联 JSON（含 tool_calls 键）
+	if calls := parseTaggedToolPayload(scanText); calls != nil {
+		LogDebug("[ExtractToolInvocations] Found tagged tool payload")
+		return validateAndNormalizeCalls(calls)
+	}
+
 	if calls := extractInlineToolCalls(scanText); calls != nil {
 		LogDebug("[ExtractToolInvocations] Found %d tool calls inline", len(calls))
 		return validateAndNormalizeCalls(calls)
 	}
 
-	// 方法3: 提取单个函数调用格式 {"name":"...","arguments":...}
 	if calls := extractSingleFunctionCall(scanText); calls != nil {
 		LogDebug("[ExtractToolInvocations] Found single function call")
 		return validateAndNormalizeCalls(calls)
 	}
 
-	// 方法4: 解析自然语言函数调用
+	if calls := parseFunctionInvocation(scanText); calls != nil {
+		LogDebug("[ExtractToolInvocations] Found function invocation pattern")
+		return validateAndNormalizeCalls(calls)
+	}
+
 	if match := functionCallPattern.FindStringSubmatch(scanText); len(match) > 2 {
 		funcName := strings.TrimSpace(match[1])
 		argsStr := strings.TrimSpace(match[2])
@@ -398,7 +515,6 @@ func ExtractToolInvocations(text string) []ToolCall {
 }
 
 func extractSingleFunctionCall(text string) []ToolCall {
-	// 查找 "name" 关键字定位候选位置
 	searchStart := 0
 	for {
 		idx := strings.Index(text[searchStart:], `"name"`)
@@ -407,7 +523,6 @@ func extractSingleFunctionCall(text string) []ToolCall {
 		}
 		idx += searchStart
 
-		// 向前查找最近的 {
 		braceStart := -1
 		for k := idx - 1; k >= 0; k-- {
 			ch := text[k]
@@ -424,7 +539,6 @@ func extractSingleFunctionCall(text string) []ToolCall {
 			continue
 		}
 
-		// 使用括号匹配找到完整 JSON 对象
 		end := findMatchingBrace(text, braceStart)
 		if end == -1 {
 			searchStart = idx + 1
@@ -432,18 +546,8 @@ func extractSingleFunctionCall(text string) []ToolCall {
 		}
 
 		jsonStr := text[braceStart:end]
-		var raw struct {
-			Name      string      `json:"name"`
-			Arguments interface{} `json:"arguments"`
-		}
-		if err := json.Unmarshal([]byte(jsonStr), &raw); err == nil && raw.Name != "" {
-			return []ToolCall{{
-				Type: "function",
-				Function: ToolCallFunction{
-					Name:      raw.Name,
-					Arguments: normalizeArguments(raw.Arguments),
-				},
-			}}
+		if calls := parseNamedFunctionObject(jsonStr); calls != nil {
+			return calls
 		}
 		searchStart = idx + 1
 	}
@@ -452,9 +556,11 @@ func extractSingleFunctionCall(text string) []ToolCall {
 func parseToolCallsJSON(jsonStr string) []ToolCall {
 	var data struct {
 		ToolCalls []struct {
-			ID       string      `json:"id"`
-			Type     string      `json:"type"`
-			Function interface{} `json:"function"`
+			ID        string      `json:"id"`
+			Type      string      `json:"type"`
+			Name      string      `json:"name"`
+			Arguments interface{} `json:"arguments"`
+			Function  interface{} `json:"function"`
 		} `json:"tool_calls"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
@@ -473,6 +579,14 @@ func parseToolCallsJSON(jsonStr string) []ToolCall {
 			call.Function.Name, _ = fn["name"].(string)
 			if args, ok := fn["arguments"]; ok {
 				call.Function.Arguments = normalizeArguments(args)
+			}
+		}
+		if call.Function.Name == "" {
+			call.Function.Name = tc.Name
+		}
+		if call.Function.Arguments == "" {
+			if tc.Arguments != nil {
+				call.Function.Arguments = normalizeArguments(tc.Arguments)
 			} else {
 				call.Function.Arguments = "{}"
 			}
@@ -483,7 +597,6 @@ func parseToolCallsJSON(jsonStr string) []ToolCall {
 }
 
 func extractInlineToolCalls(text string) []ToolCall {
-	// 快速检查：文本中必须包含 tool_calls 关键字
 	if !strings.Contains(text, `"tool_calls"`) {
 		return nil
 	}
@@ -496,35 +609,50 @@ func extractInlineToolCalls(text string) []ToolCall {
 			continue
 		}
 		jsonStr := text[i:end]
-		// 只解析包含 tool_calls 的 JSON 对象
 		if strings.Contains(jsonStr, `"tool_calls"`) {
 			if calls := parseToolCallsJSON(jsonStr); calls != nil {
 				return calls
 			}
 		}
-		// 跳过已扫描的部分
 		i = end - 1
 	}
 	return nil
 }
 
+func isToolPayload(jsonStr string) bool {
+	return parseToolCallsJSON(jsonStr) != nil || parseNamedFunctionObject(jsonStr) != nil
+}
+
 func RemoveToolJSONContent(text string) string {
-	// 移除 ```json fence 中的 tool_calls
 	result := toolCallFencePattern.ReplaceAllStringFunc(text, func(match string) string {
 		submatch := toolCallFencePattern.FindStringSubmatch(match)
-		if len(submatch) > 1 {
-			var data map[string]interface{}
-			if err := json.Unmarshal([]byte(submatch[1]), &data); err == nil {
-				if _, ok := data["tool_calls"]; ok {
-					return ""
-				}
-			}
+		if len(submatch) > 1 && isToolPayload(strings.TrimSpace(submatch[1])) {
+			return ""
 		}
 		return match
 	})
-	// 移除内联 tool_calls JSON
+	result = toolTaggedPayloadPattern.ReplaceAllString(result, "")
 	result = removeInlineToolCallJSON(result)
+	result = removeInlineSingleFunctionCallJSON(result)
 	return strings.TrimSpace(result)
+}
+
+func removeInlineSingleFunctionCallJSON(text string) string {
+	for i := 0; i < len(text); i++ {
+		if text[i] != '{' {
+			continue
+		}
+		end := findMatchingBrace(text, i)
+		if end == -1 {
+			continue
+		}
+		jsonStr := text[i:end]
+		if parseNamedFunctionObject(jsonStr) != nil {
+			return strings.TrimSpace(text[:i] + text[end:])
+		}
+		i = end - 1
+	}
+	return text
 }
 func removeInlineToolCallJSON(text string) string {
 	if !strings.Contains(text, `"tool_calls"`) {

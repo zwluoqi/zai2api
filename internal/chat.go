@@ -156,15 +156,20 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		autoWebSearch = false
 	}
 
-	// 所有请求添加图片处理MCP服务器
-	vlmServers := []string{"vlm-image-search", "vlm-image-recognition", "vlm-image-processing"}
-	existingSet := make(map[string]bool)
-	for _, s := range mcpServers {
-		existingSet[s] = true
+	if hasTools {
+		autoWebSearch = false
+		LogDebug("[Upstream] Disabled auto web search because custom tools were provided")
 	}
-	for _, s := range vlmServers {
-		if !existingSet[s] {
-			mcpServers = append(mcpServers, s)
+	if len(imageURLs) > 0 || len(videoURLs) > 0 {
+		vlmServers := []string{"vlm-image-search", "vlm-image-recognition", "vlm-image-processing"}
+		existingSet := make(map[string]bool)
+		for _, s := range mcpServers {
+			existingSet[s] = true
+		}
+		for _, s := range vlmServers {
+			if !existingSet[s] {
+				mcpServers = append(mcpServers, s)
+			}
 		}
 	}
 
