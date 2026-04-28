@@ -1,13 +1,15 @@
-name: CI
+name: Release Tag Build
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  build-release:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -24,7 +26,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build
+      - name: Build release artifacts
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -37,9 +39,30 @@ jobs:
           fi
           go build -trimpath -ldflags="-s -w" -o "dist/zai2api-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd
 
-      - name: Upload artifacts
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: zai2api-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
           if-no-files-found: error
+
+  publish-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true

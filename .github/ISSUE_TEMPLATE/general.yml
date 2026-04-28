@@ -1,0 +1,96 @@
+name: 通用 Issue
+description: 提交 Bug、需求、优化建议或其他协作事项
+title: "[Issue] "
+labels:
+  - needs-triage
+body:
+  - type: dropdown
+    id: issue_type
+    attributes:
+      label: 类型
+      description: 请选择这个 Issue 的主要类型
+      options:
+        - Bug
+        - Feature
+        - Enhancement
+        - Documentation
+        - Refactor
+        - Question
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题概述
+      description: 简要说明问题、需求或建议
+      placeholder: 用 1~3 句话说明核心内容
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景与动机
+      description: 说明为什么需要处理这个问题，或它带来的影响
+      placeholder: 当前遇到了什么问题？为什么值得做？
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤 / 使用场景
+      description: 如果是 Bug，请提供复现步骤；如果是需求，请描述使用场景
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+      description: 描述你期望的行为或结果
+      placeholder: 期望系统应该如何表现
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 描述实际发生了什么；如果不是 Bug，可留空
+      placeholder: 当前实际表现是什么
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本信息
+      description: 可填写版本号、commit、tag 或 Release 信息
+      placeholder: 例如 v1.2.3 / eedd297
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境信息
+      description: 按需填写操作系统、Go 版本、部署环境、配置差异等
+      placeholder: |
+        - OS:
+        - Go:
+        - Deployment:
+        - Other:
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 贴日志、截图、链接或其他上下文
+      placeholder: 可选
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前检查
+      options:
+        - label: 我已搜索过现有 Issue，确认没有重复内容
+          required: true
+        - label: 我已尽量补充必要上下文，方便后续排查或实现
+          required: true
