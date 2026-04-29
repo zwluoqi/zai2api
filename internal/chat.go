@@ -186,8 +186,9 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 
 	signature := GenerateSignature(userID, requestID, latestUserContent, timestamp)
 
+	apiEndpoint := GetAPIEndpoint()
 	url := fmt.Sprintf("%s?timestamp=%d&requestId=%s&user_id=%s&version=0.0.1&platform=web&token=%s&current_url=%s&pathname=%s&signature_timestamp=%d",
-		Cfg.APIEndpoint, timestamp, requestID, userID, token,
+		apiEndpoint, timestamp, requestID, userID, token,
 		fmt.Sprintf("https://chat.z.ai/c/%s", chatID),
 		fmt.Sprintf("/c/%s", chatID),
 		timestamp)

@@ -1,4 +1,10 @@
 {
+  "api": {
+    "endpoint": "https://chat.z.ai/api/v2/chat/completions",
+    "endpoints": [
+      "https://chat.z.ai/api/v2/chat/completions"
+    ]
+  },
   "run": {
     "count": 1,
     "proxy": [

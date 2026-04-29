@@ -104,6 +104,7 @@ func main() {
 	http.HandleFunc("/admin/api/tokens/restore", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenRestore))))
 	http.HandleFunc("/admin/api/tokens/test", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenTest))))
 	http.HandleFunc("/admin/api/tokens/validate", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenValidate))))
+	http.HandleFunc("/admin/api/endpoints", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminEndpoints))))
 	http.HandleFunc("/admin/api/settings", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminSettings))))
 	addr := ":" + internal.Cfg.Port
 	internal.LogInfo("Server starting on %s", addr)

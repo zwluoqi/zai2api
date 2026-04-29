@@ -54,13 +54,28 @@ const adminHTML = `<!doctype html>
     <table><thead><tr><th>Email</th><th>User ID</th><th>Token</th><th>状态</th><th>来源</th><th>失败原因</th><th>使用次数</th><th>操作</th></tr></thead><tbody id="tokens"></tbody></table>
   </section>
   <section>
+    <h2>上游 Endpoints</h2>
+    <div class="row">
+      <input id="newEndpoint" style="min-width:360px;flex:1" placeholder="https://example.workers.dev/api/v2/chat/completions">
+      <button class="primary" onclick="addEndpoint()">添加 Endpoint</button>
+    </div>
+    <table><thead><tr><th>Endpoint</th><th>状态</th><th>操作</th></tr></thead><tbody id="endpoints"></tbody></table>
+  </section>
+  <section>
     <h2>系统设置</h2>
     <pre id="settings"></pre>
   </section>
 </main>
 <script>
+const adminToken = new URLSearchParams(location.search).get('token') || '';
+function adminPath(path) {
+  if (!adminToken) return path;
+  const u = new URL(path, location.origin);
+  u.searchParams.set('token', adminToken);
+  return u.pathname + u.search;
+}
 async function api(path, opts={}) {
-  const r = await fetch(path, Object.assign({headers:{'Content-Type':'application/json'}}, opts));
+  const r = await fetch(adminPath(path), Object.assign({headers:{'Content-Type':'application/json'}}, opts));
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -87,8 +102,19 @@ async function loadTokens(){
     return '<tr><td>'+escapeHtml(t.email||'')+'</td><td>'+escapeHtml(t.user_id||'')+'</td><td class="token">'+escapeHtml(raw)+'</td><td>'+status+'</td><td>'+escapeHtml(t.source||'')+'</td><td class="reason">'+escapeHtml(t.invalid_reason||'')+'</td><td>'+t.use_count+'</td><td><button onclick="testToken(this,'+arg+')">测试</button> '+restore+'<button onclick="deleteToken('+arg+')">删除</button></td></tr>';
   }).join('');
 }
+async function loadEndpoints(){
+  const data = await api('/admin/api/endpoints');
+  endpoints.innerHTML = data.endpoints.map((endpoint, i) => {
+    const arg = JSON.stringify(endpoint).replace(/"/g,'&quot;');
+    const status = i === 0 ? '<span class="ok">默认</span>' : '轮询';
+    const del = data.endpoints.length <= 1 ? '' : '<button onclick="deleteEndpoint('+arg+')">删除</button>';
+    return '<tr><td class="token">'+escapeHtml(endpoint)+'</td><td>'+status+'</td><td>'+del+'</td></tr>';
+  }).join('');
+}
 async function loadSettings(){ settings.textContent = JSON.stringify(await api('/admin/api/settings'), null, 2); }
 async function addToken(){ await api('/admin/api/tokens',{method:'POST',body:JSON.stringify({token:newToken.value})}); newToken.value=''; loadAll(); }
+async function addEndpoint(){ const endpoint = newEndpoint.value.trim(); if(!endpoint) return; await api('/admin/api/endpoints',{method:'POST',body:JSON.stringify({endpoint})}); newEndpoint.value=''; loadAll(); }
+async function deleteEndpoint(endpoint){ if(!confirm('删除 '+endpoint+' ?')) return; await api('/admin/api/endpoints',{method:'DELETE',body:JSON.stringify({endpoint})}); loadAll(); }
 async function validateTokens(){ await api('/admin/api/tokens/validate',{method:'POST',body:'{}'}); loadAll(); }
 async function testToken(btn, token){
   btn.textContent='测试中';
@@ -103,7 +129,7 @@ async function testToken(btn, token){
 async function deleteToken(token){ if(!confirm('删除 '+token+' ?')) return; await api('/admin/api/tokens/delete',{method:'POST',body:JSON.stringify({token:token})}); loadAll(); }
 async function restoreToken(token){ await api('/admin/api/tokens/restore',{method:'POST',body:JSON.stringify({token:token})}); loadAll(); }
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
-function loadAll(){ loadStats(); loadTokens(); loadSettings(); }
+function loadAll(){ loadStats(); loadTokens(); loadEndpoints(); loadSettings(); }
 loadAll(); setInterval(loadStats, 5000);
 </script>
 </body></html>`
@@ -232,10 +258,59 @@ func HandleAdminTokenValidate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+func HandleAdminEndpoints(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		endpoints := GetAPIEndpoints()
+		writeJSON(w, map[string]any{
+			"endpoints": endpoints,
+			"default":   endpoints[0],
+		})
+	case http.MethodPost:
+		var req struct {
+			Endpoint  string   `json:"endpoint"`
+			Endpoints []string `json:"endpoints"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var err error
+		if len(req.Endpoints) > 0 {
+			err = SetAPIEndpoints(req.Endpoints)
+		} else {
+			err = AddAPIEndpoint(req.Endpoint)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "endpoints": GetAPIEndpoints()})
+	case http.MethodDelete:
+		var req struct {
+			Endpoint string `json:"endpoint"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := DeleteAPIEndpoint(req.Endpoint); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "endpoints": GetAPIEndpoints()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func HandleAdminSettings(w http.ResponseWriter, r *http.Request) {
+	endpoints := GetAPIEndpoints()
 	writeJSON(w, map[string]any{
 		"port":            Cfg.Port,
-		"api_endpoint":    Cfg.APIEndpoint,
+		"config_path":     Cfg.ConfigPath,
+		"api_endpoint":    endpoints[0],
+		"api_endpoints":   endpoints,
 		"auth_tokens":     len(Cfg.AuthTokens),
 		"backup_tokens":   len(Cfg.BackupTokens),
 		"debug_logging":   Cfg.DebugLogging,
