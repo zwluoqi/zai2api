@@ -1,0 +1,36 @@
+{
+  "run": {
+    "count": 1,
+    "proxy": [
+      "http://user:password@127.0.0.1:7890"
+    ]
+  },
+  "mail": {
+    "provider": "outlook",
+    "otp_timeout_seconds": 180,
+    "poll_interval_seconds": 4
+  },
+  "outlook": {
+    "accounts_file": "outlook.txt",
+    "used_file": "outlook_used.txt"
+  },
+  "icloud": {
+    "api_base": "https://your-gm-collection.example.com",
+    "api_token": "icloud_extral_api4538",
+    "auto_delete": true
+  },
+  "vision": {
+    "base_url": "https://oneapi.gemiaude.com",
+    "api_key": "",
+    "model": "gemini-3-flash-preview",
+    "slider_offset": 0
+  },
+  "browser": {
+    "provider": "adspower",
+    "adspower_api": "http://127.0.0.1:50325",
+    "adspower_group_id": "0",
+    "language": "ja-JP",
+    "timezone": "Asia/Tokyo",
+    "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+  }
+}

@@ -59,7 +59,7 @@ func CountToolsTokens(tools []Tool) int64 {
 	for _, tool := range tools {
 		// type 字段
 		total += CountTokens(tool.Type)
-		total += 3 
+		total += 3
 		total += CountTokens(tool.Function.Name)
 		total += CountTokens(tool.Function.Description)
 

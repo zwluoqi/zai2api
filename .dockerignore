@@ -1,0 +1,17 @@
+.git
+.github
+data/register_debug
+data/tokens.txt
+data/tokens_invalid.txt
+dist
+build
+bin
+*.log
+*.tmp
+*.test
+.DS_Store
+.env
+config.json
+outlook.txt
+outlook_used.txt
+outlook_bad.txt

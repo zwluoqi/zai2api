@@ -103,6 +103,19 @@ func GetModelMapping(modelID string) (ModelMapping, bool) {
 		}
 		return mapping, true
 	}
+	for id, mapping := range modelMappings {
+		if !strings.EqualFold(id, baseModel) {
+			continue
+		}
+		if enableThinking {
+			mapping.EnableThinking = true
+		}
+		if enableSearch {
+			mapping.WebSearch = true
+			mapping.AutoWebSearch = true
+		}
+		return mapping, true
+	}
 	if mapping, ok := modelMappings[modelID]; ok {
 		return mapping, true
 	}

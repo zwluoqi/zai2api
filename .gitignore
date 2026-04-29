@@ -30,9 +30,11 @@ main
 
 # Environment files
 .env
+/config.json
 
 # Data files (contains sensitive tokens)
 /data/tokens.txt
+/data/register_debug/
 
 # Test files
 test.txt

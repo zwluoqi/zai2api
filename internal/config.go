@@ -27,6 +27,8 @@ type Config struct {
 
 	// Display
 	Note []string // 多行备注，在 / 显示
+
+	AdminToken string
 }
 
 var Cfg *Config
@@ -115,6 +117,8 @@ func LoadConfig() {
 
 		// Display
 		Note: parseNoteLines(getEnvString("NOTE", "")),
+
+		AdminToken: getEnvString("ADMIN_TOKEN", ""),
 	}
 }
 

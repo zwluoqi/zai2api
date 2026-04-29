@@ -12,7 +12,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Admin-Token")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 
 		if r.Method == "OPTIONS" {
@@ -96,6 +96,14 @@ func main() {
 	http.HandleFunc("/", corsMiddleware(loggingMiddleware(handleRoot)))
 	http.HandleFunc("/v1/models", corsMiddleware(loggingMiddleware(internal.HandleModels)))
 	http.HandleFunc("/v1/chat/completions", corsMiddleware(loggingMiddleware(internal.HandleChatCompletions)))
+	http.HandleFunc("/admin", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdmin))))
+	http.HandleFunc("/admin/api/stats", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminStats))))
+	http.HandleFunc("/admin/api/tokens", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokens))))
+	http.HandleFunc("/admin/api/tokens/delete", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenDelete))))
+	http.HandleFunc("/admin/api/tokens/restore", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenRestore))))
+	http.HandleFunc("/admin/api/tokens/test", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenTest))))
+	http.HandleFunc("/admin/api/tokens/validate", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenValidate))))
+	http.HandleFunc("/admin/api/settings", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminSettings))))
 	addr := ":" + internal.Cfg.Port
 	internal.LogInfo("Server starting on %s", addr)
 	internal.LogInfo("API docs available at http://localhost:%s/v1/models", internal.Cfg.Port)

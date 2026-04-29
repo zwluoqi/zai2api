@@ -1,0 +1,35 @@
+services:
+  zai2api:
+    image: ${ZAI2API_IMAGE:-ghcr.io/your-github-user/zai2api:latest}
+    container_name: zai2api
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    volumes:
+      - ./data:/app/data
+
+  register:
+    image: ${ZAI2API_IMAGE:-ghcr.io/your-github-user/zai2api:latest}
+    profiles:
+      - register
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    working_dir: /app
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json:ro
+      - ./outlook.txt:/app/outlook.txt:ro
+      - ./outlook_used.txt:/app/outlook_used.txt
+      - ./outlook_bad.txt:/app/outlook_bad.txt
+    command:
+      - zai2api-register
+      - --provider
+      - outlook
+      - --browser
+      - adspower
+      - --count
+      - "1"
