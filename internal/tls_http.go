@@ -17,6 +17,21 @@ var DefaultBrowserProfile = profiles.Chrome_133
 const BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
 var (
+	chromeGetHeaderOrder = []string{
+		"host", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+		"upgrade-insecure-requests", "user-agent", "accept",
+		"sec-fetch-site", "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest",
+		"accept-encoding", "accept-language",
+	}
+	chromePostHeaderOrder = []string{
+		"host", "content-length", "sec-ch-ua", "sec-ch-ua-mobile",
+		"sec-ch-ua-platform", "content-type", "user-agent", "accept",
+		"origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
+		"referer", "accept-encoding", "accept-language",
+	}
+)
+
+var (
 	tlsClientMu sync.Mutex
 	tlsBySec    = map[int]tls_client.HttpClient{}
 )
@@ -71,4 +86,33 @@ func ApplyBrowserFingerprintHeaders(h fhttp.Header) {
 	h.Set("sec-ch-ua", `"Google Chrome";v="133", "Chromium";v="133", "Not A(Brand";v="24"`)
 	h.Set("sec-ch-ua-mobile", "?0")
 	h.Set("sec-ch-ua-platform", `"Windows"`)
+}
+
+// ApplyBrowserFetchHeaders adds the request headers browsers attach around fetch/XHR requests.
+// It should be used together with TLSHTTPClient so TLS, HTTP/2, UA, and headers stay coherent.
+func ApplyBrowserFetchHeaders(h fhttp.Header, isPost bool) {
+	if isPost {
+		h[fhttp.HeaderOrderKey] = chromePostHeaderOrder
+	} else {
+		h[fhttp.HeaderOrderKey] = chromeGetHeaderOrder
+	}
+	ApplyBrowserFingerprintHeaders(h)
+	if h.Get("Accept") == "" {
+		h.Set("Accept", "*/*")
+	}
+	if h.Get("Accept-Language") == "" {
+		h.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+	}
+	if h.Get("Sec-Fetch-Site") == "" {
+		h.Set("Sec-Fetch-Site", "same-origin")
+	}
+	if h.Get("Sec-Fetch-Mode") == "" {
+		h.Set("Sec-Fetch-Mode", "cors")
+	}
+	if h.Get("Sec-Fetch-Dest") == "" {
+		h.Set("Sec-Fetch-Dest", "empty")
+	}
+	if h.Get("DNT") == "" {
+		h.Set("DNT", "1")
+	}
 }

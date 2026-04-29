@@ -24,6 +24,7 @@ type Config struct {
 	SkipAuthToken bool
 	ScanLimit     int
 	LogLevel      string
+	SpoofClientIP bool
 
 	// 匿名 token 池（无 TokenManager / BACKUP_TOKEN 时启用；已配置上游 token 时不使用池）
 	AnonymousPoolSize               int
@@ -120,6 +121,7 @@ func LoadConfig() {
 		SkipAuthToken: getEnvBool("SKIP_AUTH_TOKEN", false),
 		ScanLimit:     getEnvInt("SCAN_LIMIT", 200000),
 		LogLevel:      getEnvString("LOG_LEVEL", "info"),
+		SpoofClientIP: getEnvBool("SPOOF_CLIENT_IP", false),
 
 		AnonymousPoolSize:               getEnvInt("ANONYMOUS_POOL_SIZE", 4),
 		AnonymousTokenTTLSeconds:        getEnvInt("ANONYMOUS_TOKEN_TTL_SECONDS", 1200),

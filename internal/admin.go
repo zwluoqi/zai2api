@@ -244,6 +244,7 @@ func HandleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		"skip_auth_token": Cfg.SkipAuthToken,
 		"scan_limit":      Cfg.ScanLimit,
 		"log_level":       Cfg.LogLevel,
+		"spoof_client_ip": Cfg.SpoofClientIP,
 		"admin_token_set": Cfg.AdminToken != "",
 		"env": map[string]string{
 			"ZAI_BROWSER":        os.Getenv("ZAI_BROWSER"),

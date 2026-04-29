@@ -8,6 +8,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,6 +23,14 @@ func generateRandomIP() string {
 	firstOctet := []int{36, 42, 58, 60, 61, 101, 106, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 139, 140, 144, 150, 153, 157, 163, 171, 175, 180, 182, 183, 202, 210, 211, 218, 219, 220, 221, 222, 223}
 	first := firstOctet[rand.Intn(len(firstOctet))]
 	return fmt.Sprintf("%d.%d.%d.%d", first, rand.Intn(256), rand.Intn(256), rand.Intn(254)+1)
+}
+
+func upstreamURLForLog(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return u.Scheme + "://" + u.Host + u.Path
 }
 
 // APIError OpenAI 兼容的错误格式
@@ -278,20 +287,20 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		return nil, "", err
 	}
 
-	randomIP := generateRandomIP()
-
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-FE-Version", GetFeVersion())
 	req.Header.Set("X-Signature", signature)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))
-	ApplyBrowserFingerprintHeaders(req.Header)
-	req.Header.Set("X-Forwarded-For", randomIP)
-	req.Header.Set("X-Real-IP", randomIP)
+	ApplyBrowserFetchHeaders(req.Header, true)
+	if Cfg.SpoofClientIP {
+		randomIP := generateRandomIP()
+		req.Header.Set("X-Forwarded-For", randomIP)
+		req.Header.Set("X-Real-IP", randomIP)
+	}
 
-	LogDebug("Upstream request: model=%s, messages=%d, XFF=%s", targetModel, len(messages), randomIP)
+	LogDebug("Upstream request: url=%s, model=%s, messages=%d, spoof_ip=%v", upstreamURLForLog(url), targetModel, len(messages), Cfg.SpoofClientIP)
 
 	client, err := TLSHTTPClient(300 * time.Second)
 	if err != nil {
@@ -302,7 +311,8 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		return nil, "", err
 	}
 
-	LogDebug("Upstream response: status=%d, XFF=%s", resp.StatusCode, randomIP)
+	LogDebug("Upstream response: url=%s, status=%d, content_type=%s, server=%s, trace_id=%s",
+		upstreamURLForLog(url), resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Server"), resp.Header.Get("X-Trace-Id"))
 	return resp, targetModel, nil
 }
 
@@ -576,7 +586,8 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			LogError("Upstream error (attempt %d): status=%d, body=%s", attempt+1, resp.StatusCode, string(body)[:min(500, len(body))])
+			LogError("Upstream error (attempt %d): status=%d, content_type=%s, server=%s, trace_id=%s, body=%s",
+				attempt+1, resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Server"), resp.Header.Get("X-Trace-Id"), string(body)[:min(500, len(body))])
 			lastError = fmt.Sprintf("status %d", resp.StatusCode)
 			// 非 5xx 错误不重试
 			if resp.StatusCode < 500 {
