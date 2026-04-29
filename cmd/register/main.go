@@ -11,7 +11,6 @@ import (
 	"io"
 	"math"
 	"math/rand"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,9 +18,12 @@ import (
 	"strings"
 	"time"
 
+	fhttp "github.com/bogdanfinn/fhttp"
+	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
+	"zai-proxy/internal"
 )
 
 // TempMailProvider 临时邮箱服务
@@ -126,28 +128,21 @@ func GeneratePassword() string {
 	return string(result)
 }
 
-// HTTPClient 带默认headers的http客户端
+// HTTPClient 基于 internal 的 tls-client（与 Chrome 133 TLS/H2/UA 指纹一致）
 type HTTPClient struct {
-	client *http.Client
+	client tls_client.HttpClient
 }
 
 func NewHTTPClient(proxy string) *HTTPClient {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if proxy != "" {
-		if proxyURL, err := url.Parse(proxy); err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-		}
+	c, err := internal.TLSHTTPClientWithProxy(90*time.Second, proxy)
+	if err != nil {
+		panic("tls-client: " + err.Error())
 	}
-	return &HTTPClient{
-		client: &http.Client{
-			Timeout:   90 * time.Second,
-			Transport: transport,
-		},
-	}
+	return &HTTPClient{client: c}
 }
 
-func (c *HTTPClient) SetDefaultHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0")
+func (c *HTTPClient) SetDefaultHeaders(req *fhttp.Request) {
+	internal.ApplyBrowserFingerprintHeaders(req.Header)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	req.Header.Set("Cache-Control", "no-cache")
@@ -156,16 +151,13 @@ func (c *HTTPClient) SetDefaultHeaders(req *http.Request) {
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	req.Header.Set("sec-ch-ua", `"Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99"`)
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", `"Linux"`)
 }
 
 // GetTempEmail 获取临时邮箱
 func (c *HTTPClient) GetTempEmail() (string, error) {
 	provider := tempMailProviders[0]
 
-	req, err := http.NewRequest("GET", provider.GenerateURL, nil)
+	req, err := fhttp.NewRequest("GET", provider.GenerateURL, nil)
 	if err != nil {
 		return "", err
 	}
@@ -213,7 +205,7 @@ func (c *HTTPClient) CheckEmail(email string) (string, error) {
 
 	maxRetries := 30
 	for i := 0; i < maxRetries; i++ {
-		req, err := http.NewRequest("GET", url, nil)
+		req, err := fhttp.NewRequest("GET", url, nil)
 		if err != nil {
 			return "", err
 		}
@@ -279,7 +271,7 @@ func (c *HTTPClient) FinishSignup(email, password, verifyToken string) (string, 
 	}
 	// Step 1: 验证邮箱
 	verifyData := fmt.Sprintf(`{"username":"%s","email":"%s","token":"%s"}`, username, email, verifyToken)
-	req, _ := http.NewRequest("POST", "https://chat.z.ai/api/v1/auths/verify_email", strings.NewReader(verifyData))
+	req, _ := fhttp.NewRequest("POST", "https://chat.z.ai/api/v1/auths/verify_email", strings.NewReader(verifyData))
 	req.Header.Set("Content-Type", "application/json")
 	c.SetDefaultHeaders(req)
 
@@ -302,7 +294,7 @@ func (c *HTTPClient) FinishSignup(email, password, verifyToken string) (string, 
 	profileImage := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGQAAABkCAYAAABw4pVUAAACtUlEQVR4AeyaPUplQRBGLy+bGaOZSWYXs41h3IEYiJF7UtyEP4kG7sBYTATBRAPxoYK/kaDQFvJ1V1e1HuGCdllf1TuHTi5vdrX+84knD4PZxE8qAghJpWOaEIKQZASSrcMNQUgyAsnW4YYgJBmBZOtwQ76EkGQfcqR1uCHJbCEEIckIJFuHG4KQZASSrcMNQUgyAsnW4YYgJBmBZOuMdEOSofNZByE+XOVUhMjofBoR4sNVTkWIjM6nESE+XOVUhMjofBoR4sNVTkWIjM6nESE+XOVUhMjofBoR4sNVTkWIjM6nMb2QhZWzaWH1otnzY+nIh2Sj1PRCGn3OYWIQkkzVUEKeLo+n273luudgLZmCt+uMJeRuPt2f7FQ9D6f7bwkk+2soIcnYuayDEBeseihCdHZWp1xDiIzOpxEhPlzlVITI6HwaEeLDVU4dSsjs99+qd1rfF3dlUL0ahxLSC0rkHIRE0i/MHkrI4/nhNN/4JT/XW/8KCHIdDSUkFzqfbRDiw1VONYXIqTTKBBAio/NpRIgPVzkVITI6n0aE+HCVUxEio/NpRIgPVzl1KCG1LxdfvnD37f+WDMy7cSgh3jAy5CMkg4VXOwQIeTX9A7/ON//ILxPfexF5s734gckx/5JeSAyWuKkIiWNfnIyQIpa4Q4TEsS9ORkgRS9whQuLYFycjpIgl7hAhceyLkxFSxBJ3+GmExCFsOxkhbXlWpyGkGmHbAIS05VmdhpBqhG0DENKWZ3UaQqoRtg1ASFue1WkIqUbYNgAhbXlWpyHERNi/iJD+zM2JCDHx9C8ipD9zcyJCTDz9iwjpz9yciBATT/8iQvozNycixMTTv4iQ/szNiQgx8fgUrVSEWHQCaggJgG6NRIhFJ6CGkADo1kiEWHQCaggJgG6NRIhFJ6CGkADo1shnAAAA//+Le9XMAAAABklEQVQDAJLb6FjT4DiyAAAAAElFTkSuQmCC"
 	signupData := fmt.Sprintf(`{"username":"%s","email":"%s","token":"%s","password":"%s","profile_image_url":"%s","sso_redirect":null}`, username, email, verifyToken, password, profileImage)
 
-	req2, _ := http.NewRequest("POST", "https://chat.z.ai/api/v1/auths/finish_signup", strings.NewReader(signupData))
+	req2, _ := fhttp.NewRequest("POST", "https://chat.z.ai/api/v1/auths/finish_signup", strings.NewReader(signupData))
 	req2.Header.Set("Content-Type", "application/json")
 	if tempToken != "" {
 		req2.Header.Set("Cookie", "token="+tempToken)
@@ -709,9 +701,10 @@ func (br *BrowserRegister) analyzeWithGemini(screenshot []byte, imageWidth, imag
 		return 0, err
 	}
 
-	req, _ := http.NewRequest("POST", apiURL, strings.NewReader(string(requestBody)))
+	req, _ := fhttp.NewRequest("POST", apiURL, strings.NewReader(string(requestBody)))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+br.vision.APIKey)
+	internal.ApplyBrowserFingerprintHeaders(req.Header)
 
 	resp, err := br.httpClient.client.Do(req)
 	if err != nil {

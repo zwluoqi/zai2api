@@ -91,6 +91,7 @@ func main() {
 		internal.LogError("TokenManager 启动失败: %v", err)
 	}
 
+	internal.StartAnonymousTokenPool()
 	internal.StartVersionUpdater()
 	internal.StartModelFetcher()
 	http.HandleFunc("/", corsMiddleware(loggingMiddleware(handleRoot)))

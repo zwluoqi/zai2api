@@ -2,10 +2,11 @@ package internal
 
 import (
 	"io"
-	"net/http"
 	"regexp"
 	"sync"
 	"time"
+
+	fhttp "github.com/bogdanfinn/fhttp"
 )
 
 var (
@@ -20,7 +21,18 @@ func GetFeVersion() string {
 }
 
 func fetchFeVersion() {
-	resp, err := http.Get("https://chat.z.ai/")
+	client, err := TLSHTTPClient(15 * time.Second)
+	if err != nil {
+		LogError("Failed to create tls client for fe version: %v", err)
+		return
+	}
+	req, err := fhttp.NewRequest("GET", "https://chat.z.ai/", nil)
+	if err != nil {
+		LogError("Failed to create fe version request: %v", err)
+		return
+	}
+	ApplyBrowserFingerprintHeaders(req.Header)
+	resp, err := client.Do(req)
 	if err != nil {
 		LogError("Failed to fetch fe version: %v", err)
 		return

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	fhttp "github.com/bogdanfinn/fhttp"
 )
 
 type ZAIModel struct {
@@ -130,19 +132,24 @@ func GetUpstreamConfig(requestedModel string) *ModelMapping {
 }
 
 func fetchLatestModels() {
-	token, err := GetAnonymousToken()
+	token, err := GetUpstreamTokenForModelAPI()
 	if err != nil {
 		LogDebug("Failed to get token for model fetching: %v", err)
 		return
 	}
-	req, err := http.NewRequest("GET", "https://chat.z.ai/api/models", nil)
+	req, err := fhttp.NewRequest("GET", "https://chat.z.ai/api/models", nil)
 	if err != nil {
 		LogDebug("Failed to create model request: %v", err)
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
-	client := &http.Client{Timeout: 10 * time.Second}
+	ApplyBrowserFingerprintHeaders(req.Header)
+	client, err := TLSHTTPClient(10 * time.Second)
+	if err != nil {
+		LogDebug("Failed to create tls client: %v", err)
+		return
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		LogDebug("Failed to fetch models: %v", err)

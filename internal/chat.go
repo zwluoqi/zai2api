@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/corpix/uarand"
+	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/google/uuid"
 )
 
@@ -120,7 +120,7 @@ func extractAllMediaURLs(messages []Message) (imageURLs, videoURLs []string) {
 	return imageURLs, videoURLs
 }
 
-func makeUpstreamRequest(token string, messages []Message, model string, imageURLs, videoURLs []string, hasTools bool) (*http.Response, string, error) {
+func makeUpstreamRequest(token string, messages []Message, model string, imageURLs, videoURLs []string, hasTools bool) (*fhttp.Response, string, error) {
 	payload, err := DecodeJWTPayload(token)
 	if err != nil || payload == nil {
 		return nil, "", fmt.Errorf("invalid token")
@@ -156,15 +156,20 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		autoWebSearch = false
 	}
 
-	// 所有请求添加图片处理MCP服务器
-	vlmServers := []string{"vlm-image-search", "vlm-image-recognition", "vlm-image-processing"}
-	existingSet := make(map[string]bool)
-	for _, s := range mcpServers {
-		existingSet[s] = true
+	if hasTools {
+		autoWebSearch = false
+		LogDebug("[Upstream] Disabled auto web search because custom tools were provided")
 	}
-	for _, s := range vlmServers {
-		if !existingSet[s] {
-			mcpServers = append(mcpServers, s)
+	if len(imageURLs) > 0 || len(videoURLs) > 0 {
+		vlmServers := []string{"vlm-image-search", "vlm-image-recognition", "vlm-image-processing"}
+		existingSet := make(map[string]bool)
+		for _, s := range mcpServers {
+			existingSet[s] = true
+		}
+		for _, s := range vlmServers {
+			if !existingSet[s] {
+				mcpServers = append(mcpServers, s)
+			}
 		}
 	}
 
@@ -268,7 +273,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 
 	bodyBytes, _ := json.Marshal(body)
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	req, err := fhttp.NewRequest("POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, "", err
 	}
@@ -282,13 +287,16 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))
-	req.Header.Set("User-Agent", uarand.GetRandom())
+	ApplyBrowserFingerprintHeaders(req.Header)
 	req.Header.Set("X-Forwarded-For", randomIP)
 	req.Header.Set("X-Real-IP", randomIP)
 
 	LogDebug("Upstream request: model=%s, messages=%d, XFF=%s", targetModel, len(messages), randomIP)
 
-	client := &http.Client{Timeout: 300 * time.Second}
+	client, err := TLSHTTPClient(300 * time.Second)
+	if err != nil {
+		return nil, "", err
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
@@ -662,6 +670,7 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 	pendingSourcesMarkdown := ""
 	pendingImageSearchMarkdown := ""
 	totalContentOutputLength := 0 // 记录已输出的 content 字符长度
+	hasTools := len(tools) > 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -958,6 +967,10 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 			totalContentOutputLength += len([]rune(content))
 		}
 		fullContent.WriteString(content)
+		outputTokens += CountTokens(content)
+		if hasTools {
+			continue
+		}
 
 		chunk := ChatCompletionChunk{
 			ID:      completionID,
@@ -971,7 +984,6 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 			}},
 		}
 
-		outputTokens += CountTokens(content)
 		chunkData, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", chunkData)
 		flusher.Flush()
@@ -984,20 +996,22 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 	if remaining := searchRefFilter.Flush(); remaining != "" {
 		hasContent = true
 		fullContent.WriteString(remaining)
-		chunk := ChatCompletionChunk{
-			ID:      completionID,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   modelName,
-			Choices: []Choice{{
-				Index:        0,
-				Delta:        &Delta{Content: remaining},
-				FinishReason: nil,
-			}},
+		if !hasTools {
+			chunk := ChatCompletionChunk{
+				ID:      completionID,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   modelName,
+				Choices: []Choice{{
+					Index:        0,
+					Delta:        &Delta{Content: remaining},
+					FinishReason: nil,
+				}},
+			}
+			chunkData, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", chunkData)
+			flusher.Flush()
 		}
-		chunkData, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", chunkData)
-		flusher.Flush()
 	}
 
 	if !hasContent {
@@ -1035,6 +1049,24 @@ func handleStreamResponse(w http.ResponseWriter, body io.ReadCloser, completionI
 				}
 				toolData, _ := json.Marshal(toolChunk)
 				fmt.Fprintf(w, "data: %s\n\n", toolData)
+				flusher.Flush()
+			}
+		} else {
+			bufferedContent := RemoveToolJSONContent(rawContent)
+			if bufferedContent != "" {
+				chunk := ChatCompletionChunk{
+					ID:      completionID,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   modelName,
+					Choices: []Choice{{
+						Index:        0,
+						Delta:        &Delta{Content: bufferedContent},
+						FinishReason: nil,
+					}},
+				}
+				chunkData, _ := json.Marshal(chunk)
+				fmt.Fprintf(w, "data: %s\n\n", chunkData)
 				flusher.Flush()
 			}
 		}
@@ -1226,9 +1258,9 @@ func handleNonStreamResponse(w http.ResponseWriter, body io.ReadCloser, completi
 	var toolCalls []ToolCall
 	if len(tools) > 0 {
 		toolCalls = ExtractToolInvocations(fullContent)
+		fullContent = RemoveToolJSONContent(fullContent)
 		if len(toolCalls) > 0 {
 			stopReason = "tool_calls"
-			fullContent = RemoveToolJSONContent(fullContent)
 		}
 	}
 	outputTokens = CountTokens(fullContent) + CountTokens(fullReasoning)
@@ -1928,9 +1960,9 @@ func handleNonStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser,
 	var toolCalls []ToolCall
 	if len(tools) > 0 {
 		toolCalls = ExtractToolInvocations(fullContent)
+		fullContent = RemoveToolJSONContent(fullContent)
 		if len(toolCalls) > 0 {
 			stopReason = "tool_calls"
-			fullContent = RemoveToolJSONContent(fullContent)
 		}
 	}
 

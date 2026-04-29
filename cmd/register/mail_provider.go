@@ -12,7 +12,6 @@ import (
 	"mime/multipart"
 	"mime/quotedprintable"
 	"net"
-	"net/http"
 	"net/mail"
 	"net/url"
 	"os"
@@ -23,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	fhttp "github.com/bogdanfinn/fhttp"
 )
 
 type VerificationMailbox interface {
@@ -353,7 +354,7 @@ func refreshOutlookAccessTokenOnce(clientID, refreshToken, proxy string) (string
 	form.Set("client_id", clientID)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
-	req, err := http.NewRequest("POST", outlookTokenURL, strings.NewReader(form.Encode()))
+	req, err := fhttp.NewRequest("POST", outlookTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", "", err
 	}
@@ -613,7 +614,7 @@ func NewICloudClient(apiBase, apiToken string, autoDelete bool, proxy string) *I
 	}
 }
 
-func (c *ICloudClient) headers(req *http.Request) {
+func (c *ICloudClient) headers(req *fhttp.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiToken)
 }
@@ -623,7 +624,7 @@ func (c *ICloudClient) CreateAlias() (*ICloudAlias, error) {
 		return nil, fmt.Errorf("icloud.api_base 未配置")
 	}
 	payload := strings.NewReader(`{"channel":"zai"}`)
-	req, err := http.NewRequest("POST", c.apiBase+"/api/external/icloud/alias/create", payload)
+	req, err := fhttp.NewRequest("POST", c.apiBase+"/api/external/icloud/alias/create", payload)
 	if err != nil {
 		return nil, err
 	}
@@ -651,7 +652,7 @@ func (c *ICloudClient) CreateAlias() (*ICloudAlias, error) {
 
 func (c *ICloudClient) ListEmails(alias *ICloudAlias) []map[string]any {
 	payload := fmt.Sprintf(`{"apple_id":%q,"alias_email":%q,"folders":["INBOX","Junk"],"top":20,"skip":0}`, alias.AppleID, alias.AliasEmail)
-	req, err := http.NewRequest("POST", c.apiBase+"/api/external/icloud/alias/emails", strings.NewReader(payload))
+	req, err := fhttp.NewRequest("POST", c.apiBase+"/api/external/icloud/alias/emails", strings.NewReader(payload))
 	if err != nil {
 		return nil
 	}
@@ -677,7 +678,7 @@ func (c *ICloudClient) DeleteAlias(alias *ICloudAlias) error {
 		return nil
 	}
 	payload := fmt.Sprintf(`{"apple_id":%q,"alias_email":%q}`, alias.AppleID, alias.AliasEmail)
-	req, err := http.NewRequest("POST", c.apiBase+"/api/external/icloud/alias/delete", strings.NewReader(payload))
+	req, err := fhttp.NewRequest("POST", c.apiBase+"/api/external/icloud/alias/delete", strings.NewReader(payload))
 	if err != nil {
 		return err
 	}

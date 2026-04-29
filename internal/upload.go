@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/google/uuid"
 )
 
@@ -176,19 +177,18 @@ func downloadFromURL(url string) (data []byte, contentType string, filename stri
 	}
 	LogDebug("[Download] Starting: %s", urlPreview)
 
-	client := &http.Client{
-		Timeout: 60 * time.Second,
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-		},
+	client, err := TLSHTTPClient(60 * time.Second)
+	if err != nil {
+		LogError("[Download] tls client: %v", err)
+		return nil, "", "", ErrRequestFailed
 	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := fhttp.NewRequest("GET", url, nil)
 	if err != nil {
 		LogError("[Download] create request error: %v", err)
 		return nil, "", "", ErrRequestFailed
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	ApplyBrowserFingerprintHeaders(req.Header)
 	req.Header.Set("Accept", "image/*, video/*, */*")
 	if strings.Contains(url, "qq.com") {
 		req.Header.Set("Referer", "https://qq.com/")
@@ -260,7 +260,7 @@ func uploadToZAI(token string, data []byte, filename string, contentType string)
 	}
 	writer.Close()
 
-	req, err := http.NewRequest("POST", "https://chat.z.ai/api/v1/files/", &buf)
+	req, err := fhttp.NewRequest("POST", "https://chat.z.ai/api/v1/files/", &buf)
 	if err != nil {
 		LogError("create request error: %v", err)
 		return nil, ErrRequestFailed
@@ -277,10 +277,7 @@ func uploadToZAI(token string, data []byte, filename string, contentType string)
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", "https://chat.z.ai/")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0")
-	req.Header.Set("Sec-Ch-Ua", `"Chromium";v="142", "Microsoft Edge";v="142", "Not_A Brand";v="99"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Linux"`)
+	ApplyBrowserFingerprintHeaders(req.Header)
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
@@ -290,11 +287,10 @@ func uploadToZAI(token string, data []byte, filename string, contentType string)
 	req.Header.Set("X-Forwarded-For", randomIP)
 	req.Header.Set("X-Real-IP", randomIP)
 
-	client := &http.Client{
-		Timeout: 120 * time.Second,
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-		},
+	client, err := TLSHTTPClient(120 * time.Second)
+	if err != nil {
+		LogError("tls client: %v", err)
+		return nil, ErrRequestFailed
 	}
 
 	resp, err := client.Do(req)

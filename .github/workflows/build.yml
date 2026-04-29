@@ -1,10 +1,8 @@
-name: Build and Release
+name: CI
 
 on:
   push:
     branches: [main]
-    tags:
-      - 'v*'
   pull_request:
     branches: [main]
 
@@ -23,25 +21,28 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
+          cache: true
 
       - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
         run: |
           mkdir -p dist
-          EXT=""
+          ext=""
           if [ "$GOOS" = "windows" ]; then
-            EXT=".exe"
+            ext=".exe"
           fi
-          go build -ldflags="-s -w" -o dist/zai2api-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/main.go
+          go build -trimpath -ldflags="-s -w" -o "dist/zai2api-${{ matrix.goos }}-${{ matrix.goarch }}${ext}" ./cmd
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: zai2api-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
+          if-no-files-found: error
 
   release:
     needs: build
