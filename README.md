@@ -134,6 +134,7 @@ go run ./cmd/register \
 
 ## Docker 部署
 
+
 GitHub Actions 会在 push 到 `main` 或推送 `v*` tag 时构建镜像并推送到 GHCR：
 
 ```text
