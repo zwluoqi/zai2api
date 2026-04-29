@@ -35,6 +35,9 @@ main
 # Data files (contains sensitive tokens)
 /data/tokens.txt
 /data/register_debug/
+/data/history/
+/data/telemetry_stats.json
+/data/token_stats.json
 
 # Test files
 test.txt

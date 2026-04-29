@@ -75,42 +75,6 @@ AUTH_TOKEN=your-api-key
 
 完整配置请参考 [.env.example](.env.example)
 
-### Cloudflare Worker 转发
-
-仓库包含 `worker.js`，可部署到 Cloudflare Workers 作为 `https://chat.z.ai` 的路径透传代理。使用脚本部署：
-
-```bash
-export CLOUDFLARE_API_TOKEN="your-cloudflare-api-token"
-export CLOUDFLARE_ACCOUNT_ID="your-account-id"
-export CLOUDFLARE_WORKER_NAME="your-worker-name"
-
-python3 scripts/deploy-cloudflare-worker.py --enable-subdomain
-```
-
-也可以用命令行参数覆盖：
-
-```bash
-python3 scripts/deploy-cloudflare-worker.py \
-  --api-token "your-cloudflare-api-token" \
-  --account-id "your-account-id" \
-  --script-name "your-worker-name" \
-  --worker worker.js \
-  --enable-subdomain
-```
-
-推荐将上游接口配置到 `config.json` 的 `api.endpoints`，也可以在管理页添加：
-
-```json
-{
-  "api": {
-    "endpoint": "https://your-worker.your-subdomain.workers.dev/api/v2/chat/completions",
-    "endpoints": [
-      "https://your-worker.your-subdomain.workers.dev/api/v2/chat/completions"
-    ]
-  }
-}
-```
-
 ## 使用示例
 
 ### cURL

@@ -1,6 +1,9 @@
 package internal
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +36,40 @@ var telemetry = &Telemetry{
 	modelStats:   make(map[string]*ModelStats),
 }
 
+type telemetryPersistedStats struct {
+	TotalRequests  int64                  `json:"total_requests"`
+	TotalInputTok  int64                  `json:"total_input_tokens"`
+	TotalOutputTok int64                  `json:"total_output_tokens"`
+	ModelStats     map[string]*ModelStats `json:"model_stats,omitempty"`
+	UpdatedAt      time.Time              `json:"updated_at"`
+}
+
+func LoadTelemetryStats() {
+	path := filepath.Join("data", "telemetry_stats.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		LogWarn("读取 telemetry 统计失败: %v", err)
+		return
+	}
+	var stats telemetryPersistedStats
+	if err := json.Unmarshal(data, &stats); err != nil {
+		LogWarn("解析 telemetry 统计失败: %v", err)
+		return
+	}
+	atomic.StoreInt64(&telemetry.TotalRequests, stats.TotalRequests)
+	atomic.StoreInt64(&telemetry.TotalInputTok, stats.TotalInputTok)
+	atomic.StoreInt64(&telemetry.TotalOutputTok, stats.TotalOutputTok)
+	telemetry.mu.Lock()
+	if stats.ModelStats != nil {
+		telemetry.modelStats = stats.ModelStats
+	}
+	telemetry.mu.Unlock()
+	LogInfo("已加载 telemetry 持久化统计: requests=%d", stats.TotalRequests)
+}
+
 func RecordRequest(inputTokens, outputTokens int64, model string) {
 	atomic.AddInt64(&telemetry.TotalRequests, 1)
 	atomic.AddInt64(&telemetry.TotalInputTok, inputTokens)
@@ -52,6 +89,46 @@ func RecordRequest(inputTokens, outputTokens int64, model string) {
 		telemetry.modelStats[model].OutputTok += outputTokens
 	}
 	telemetry.mu.Unlock()
+	saveTelemetryStats()
+}
+
+func saveTelemetryStats() {
+	if err := os.MkdirAll("data", 0755); err != nil {
+		LogWarn("创建 data 目录失败: %v", err)
+		return
+	}
+	telemetry.mu.Lock()
+	modelStatsCopy := make(map[string]*ModelStats, len(telemetry.modelStats))
+	for model, stats := range telemetry.modelStats {
+		modelStatsCopy[model] = &ModelStats{
+			Requests:  stats.Requests,
+			InputTok:  stats.InputTok,
+			OutputTok: stats.OutputTok,
+		}
+	}
+	telemetry.mu.Unlock()
+	stats := telemetryPersistedStats{
+		TotalRequests:  atomic.LoadInt64(&telemetry.TotalRequests),
+		TotalInputTok:  atomic.LoadInt64(&telemetry.TotalInputTok),
+		TotalOutputTok: atomic.LoadInt64(&telemetry.TotalOutputTok),
+		ModelStats:     modelStatsCopy,
+		UpdatedAt:      time.Now(),
+	}
+	data, err := json.MarshalIndent(stats, "", "  ")
+	if err != nil {
+		LogWarn("序列化 telemetry 统计失败: %v", err)
+		return
+	}
+	data = append(data, '\n')
+	path := filepath.Join("data", "telemetry_stats.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		LogWarn("写入 telemetry 统计失败: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		LogWarn("保存 telemetry 统计失败: %v", err)
+	}
 }
 
 func GetRPM() int {

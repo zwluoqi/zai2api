@@ -349,11 +349,14 @@ func (u *UpstreamData) GetErrorMessage() string {
 
 // UpstreamResult 上游请求结果
 type UpstreamResult struct {
-	Success         bool
-	HasContent      bool
-	ResponseStarted bool
-	ErrorMessage    string
-	OutputTokens    int64
+	Success          bool
+	HasContent       bool
+	ResponseStarted  bool
+	ErrorMessage     string
+	OutputTokens     int64
+	Content          string
+	ReasoningContent string
+	ToolCalls        []ToolCall
 }
 
 const RetryableErr = "INTERNAL_ERROR"
@@ -469,18 +472,56 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeInvalidRequestError(w, "无效的请求格式")
+		return
+	}
+
+	var req ChatRequest
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		history := StartChatHistory("", false, nil, 0)
+		history.FinishFailed("", 0, "无效的请求格式", nil)
+		RecordRequest(0, 0, "")
+		writeInvalidRequestError(w, "无效的请求格式")
+		return
+	}
+
+	if req.Model == "" {
+		req.Model = "GLM-4.6"
+	}
+
+	messages := req.Messages
+	if len(req.Tools) > 0 {
+		messages = ProcessMessagesWithTools(messages, req.Tools, req.ToolChoice)
+	}
+	inputTokens := CountRequestTokens(messages, req.Tools)
+	history := StartChatHistory(req.Model, req.Stream, req.Messages, inputTokens)
+	telemetryRecorded := false
+	recordTelemetry := func(output int64) {
+		if telemetryRecorded {
+			return
+		}
+		RecordRequest(inputTokens, output, req.Model)
+		telemetryRecorded = true
+	}
+
 	apiKey := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 
 	// API Key 认证
 	if !Cfg.SkipAuthToken {
 		if apiKey == "" {
 			LogDebug("Missing Authorization header")
+			history.FinishFailed("", 0, "Missing or invalid Authorization header", nil)
+			recordTelemetry(0)
 			writeError(w, http.StatusUnauthorized, ErrTypeAuthentication, "Missing or invalid Authorization header", "invalid_api_key")
 			return
 		}
 		// 验证 API Key
 		if !ValidateAuthToken(apiKey) {
 			LogDebug("Invalid API key: %s...", apiKey[:min(8, len(apiKey))])
+			history.FinishFailed("", 0, "Invalid API key", nil)
+			recordTelemetry(0)
 			writeError(w, http.StatusUnauthorized, ErrTypeAuthentication, "Invalid API key", "invalid_api_key")
 			return
 		}
@@ -490,6 +531,14 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	clientIP := GetClientIP(r)
 	isMultimodal := false
+
+	// 验证模型是否存在
+	if !IsValidModel(req.Model) {
+		history.FinishFailed("", 0, fmt.Sprintf("模型 '%s' 不存在", req.Model), nil)
+		recordTelemetry(0)
+		writeModelNotFoundError(w, req.Model)
+		return
+	}
 
 	var token string
 	// 优先使用 TokenManager 中的 token
@@ -504,6 +553,8 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			LogError("Failed to get anonymous token: %v", err)
 			GetTokenManager().RecordCall(false, false)
+			history.FinishFailed("", 0, err.Error(), nil)
+			recordTelemetry(0)
 			writeErrorResponse(w, http.StatusInternalServerError)
 			return
 		}
@@ -511,21 +562,6 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		LogDebug("Using anonymous token: %s...", token[:min(10, len(token))])
 	}
 
-	var req ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeInvalidRequestError(w, "无效的请求格式")
-		return
-	}
-
-	if req.Model == "" {
-		req.Model = "GLM-4.6"
-	}
-
-	// 验证模型是否存在
-	if !IsValidModel(req.Model) {
-		writeModelNotFoundError(w, req.Model)
-		return
-	}
 	// 检测多模态
 	reqImageURLs, reqVideoURLs := extractAllMediaURLs(req.Messages)
 	if len(reqImageURLs) > 0 || len(reqVideoURLs) > 0 {
@@ -547,13 +583,6 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 处理工具调用
-	messages := req.Messages
-	if len(req.Tools) > 0 {
-		messages = ProcessMessagesWithTools(messages, req.Tools, req.ToolChoice)
-	}
-
-	inputTokens := CountRequestTokens(messages, req.Tools)
 	LogDebug("Chat request: model=%s, messages=%d, stream=%v, input_tokens=%d, ip=%s, multimodal=%v, tools=%d",
 		req.Model, len(messages), req.Stream, inputTokens, clientIP, isMultimodal, len(req.Tools))
 
@@ -562,6 +591,8 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var outputTokens int64
 	var lastError string
+	var usedModelName string
+	var lastResult UpstreamResult
 	success := false
 
 	// 重试循环
@@ -593,12 +624,15 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 非 5xx 错误不重试
 			if resp.StatusCode < 500 {
 				GetTokenManager().RecordCall(false, isMultimodal)
+				history.FinishFailed(modelName, 0, fmt.Sprintf("upstream status %d: %s", resp.StatusCode, string(body)[:min(500, len(body))]), nil)
+				recordTelemetry(0)
 				writeUpstreamError(w, resp.StatusCode, body)
 				return
 			}
 			continue
 		}
 
+		usedModelName = modelName
 		var result UpstreamResult
 		if req.Stream {
 			result = handleStreamResponseWithRetry(w, resp.Body, completionID, modelName, inputTokens, includeUsage, req.Tools, attempt == 0)
@@ -608,6 +642,7 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		resp.Body.Close()
 
 		outputTokens = result.OutputTokens
+		lastResult = result
 
 		if result.Success && result.HasContent {
 			success = true
@@ -633,12 +668,31 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !success && !req.Stream {
 		// 非流式请求失败，返回错误
 		GetTokenManager().RecordCall(false, isMultimodal)
+		history.FinishFailed(usedModelName, outputTokens, fmt.Sprintf("请求失败: %s", lastError), historyAssistantFromResult(lastResult))
+		recordTelemetry(outputTokens)
+		writeError(w, http.StatusBadGateway, ErrTypeUpstream, fmt.Sprintf("请求失败: %s", lastError), "upstream_error")
+		return
+	}
+	if !success && req.Stream && !lastResult.ResponseStarted {
+		GetTokenManager().RecordCall(false, isMultimodal)
+		history.FinishFailed(usedModelName, outputTokens, fmt.Sprintf("请求失败: %s", lastError), historyAssistantFromResult(lastResult))
+		recordTelemetry(outputTokens)
 		writeError(w, http.StatusBadGateway, ErrTypeUpstream, fmt.Sprintf("请求失败: %s", lastError), "upstream_error")
 		return
 	}
 
+	if success {
+		if assistant := historyAssistantFromResult(lastResult); assistant != nil {
+			history.FinishSuccess(usedModelName, outputTokens, *assistant)
+		} else {
+			history.FinishSuccess(usedModelName, outputTokens, HistoryMessage{Role: "assistant"})
+		}
+	} else {
+		history.FinishFailed(usedModelName, outputTokens, lastError, historyAssistantFromResult(lastResult))
+	}
+
 	// 记录遥测数据
-	RecordRequest(inputTokens, outputTokens, req.Model)
+	recordTelemetry(outputTokens)
 	GetTokenManager().RecordCall(success, isMultimodal)
 	LogDebug("Chat completed: model=%s, input_tokens=%d, output_tokens=%d, ip=%s, success=%v",
 		req.Model, inputTokens, outputTokens, clientIP, success)
@@ -1306,6 +1360,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 	result := UpstreamResult{Success: true, HasContent: false}
 	var outputTokens int64
 	var fullContent strings.Builder
+	var fullReasoning strings.Builder
 	var upstreamError string
 
 	flusher, ok := w.(http.Flusher)
@@ -1408,6 +1463,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 				if !sendChunk(errChunk) {
 					return result
 				}
+				fullContent.WriteString(errContent)
 				hasContent = true
 			}
 			break
@@ -1452,6 +1508,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 					if !sendChunk(chunk) {
 						return result
 					}
+					fullReasoning.WriteString(reasoningContent)
 				}
 			}
 			continue
@@ -1489,6 +1546,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 					if !sendChunk(chunk) {
 						return result
 					}
+					fullContent.WriteString(textBeforeBlock)
 				}
 			}
 			if results := ParseImageSearchResults(editContent); len(results) > 0 {
@@ -1516,6 +1574,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 					if !sendChunk(chunk) {
 						return result
 					}
+					fullContent.WriteString(textBeforeBlock)
 				}
 			}
 			continue
@@ -1540,6 +1599,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 			if !sendChunk(chunk) {
 				return result
 			}
+			fullContent.WriteString(pendingSourcesMarkdown)
 			pendingSourcesMarkdown = ""
 		}
 		if pendingImageSearchMarkdown != "" {
@@ -1558,6 +1618,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 			if !sendChunk(chunk) {
 				return result
 			}
+			fullContent.WriteString(pendingImageSearchMarkdown)
 			pendingImageSearchMarkdown = ""
 		}
 
@@ -1583,6 +1644,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 				if !sendChunk(chunk) {
 					return result
 				}
+				fullReasoning.WriteString(processedRemaining)
 			}
 		}
 
@@ -1602,6 +1664,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 			if !sendChunk(chunk) {
 				return result
 			}
+			fullReasoning.WriteString(pendingSourcesMarkdown)
 			pendingSourcesMarkdown = ""
 		}
 
@@ -1652,6 +1715,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 			if !sendChunk(chunk) {
 				return result
 			}
+			fullReasoning.WriteString(reasoningContent)
 		}
 
 		if content == "" {
@@ -1762,6 +1826,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 		}
 	}
 
+	outputTokens = CountTokens(fullContent.String()) + CountTokens(fullReasoning.String())
 	if !hasContent {
 		result.OutputTokens = outputTokens
 		result.ErrorMessage = "empty response"
@@ -1810,6 +1875,9 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 
 	result.HasContent = hasContent
 	result.OutputTokens = outputTokens
+	result.Content = fullContent.String()
+	result.ReasoningContent = fullReasoning.String()
+	result.ToolCalls = toolCalls
 	return result
 }
 
@@ -1981,6 +2049,9 @@ func handleNonStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser,
 	// 计算输出 token
 	outputTokens = CountTokens(fullContent) + CountTokens(fullReasoning)
 	result.OutputTokens = outputTokens
+	result.Content = fullContent
+	result.ReasoningContent = fullReasoning
+	result.ToolCalls = toolCalls
 
 	// 写入响应
 	w.Header().Set("Content-Type", "application/json")

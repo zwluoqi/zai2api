@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,6 +55,7 @@ type TokenManager struct {
 	multimodalCount int64 // 多模态请求计数
 	totalCalls      int64 // 累计调用次数
 	successCalls    int64 // 成功调用次数
+	tokenUseCounts  map[string]int64
 }
 
 var (
@@ -65,12 +67,13 @@ var (
 func GetTokenManager() *TokenManager {
 	tokenOnce.Do(func() {
 		tokenManager = &TokenManager{
-			tokens:        make(map[string]*TokenInfo),
-			invalidTokens: make(map[string]*TokenInfo),
-			validTokens:   make([]string, 0),
-			dataDir:       "data",
-			checkInterval: 5 * time.Minute, // 每5分钟检查一次
-			stopChan:      make(chan struct{}),
+			tokens:         make(map[string]*TokenInfo),
+			invalidTokens:  make(map[string]*TokenInfo),
+			validTokens:    make([]string, 0),
+			dataDir:        "data",
+			checkInterval:  5 * time.Minute, // 每5分钟检查一次
+			stopChan:       make(chan struct{}),
+			tokenUseCounts: make(map[string]int64),
 		}
 	})
 	return tokenManager
@@ -82,6 +85,8 @@ func (tm *TokenManager) Start() error {
 	if err := os.MkdirAll(tm.dataDir, 0755); err != nil {
 		return fmt.Errorf("创建 data 目录失败: %v", err)
 	}
+
+	tm.loadPersistentStats()
 
 	// 初始加载 token
 	if err := tm.loadTokens(); err != nil {
@@ -193,8 +198,9 @@ func (tm *TokenManager) reuseOrCreateTokenInfo(token string, sources ...map[stri
 		}
 	}
 	info := &TokenInfo{
-		Token: token,
-		Valid: true,
+		Token:    token,
+		Valid:    true,
+		UseCount: tm.tokenUseCounts[tokenStatsKey(token)],
 	}
 	if payload, err := DecodeJWTPayload(token); err == nil && payload != nil {
 		info.Email = payload.Email
@@ -447,7 +453,9 @@ func (tm *TokenManager) GetToken() string {
 	// 增加使用计数
 	if info, exists := tm.tokens[token]; exists {
 		info.UseCount++
+		tm.tokenUseCounts[tokenStatsKey(token)] = info.UseCount
 	}
+	tm.savePersistentStatsLocked()
 
 	return token
 }
@@ -747,6 +755,91 @@ func previewToken(token string) string {
 	return token[:10] + "..." + token[len(token)-8:]
 }
 
+type tokenManagerPersistedStats struct {
+	TotalCalls      int64            `json:"total_calls"`
+	SuccessCalls    int64            `json:"success_calls"`
+	MultimodalCount int64            `json:"multimodal_count"`
+	TokenUseCounts  map[string]int64 `json:"token_use_counts,omitempty"`
+	UpdatedAt       time.Time        `json:"updated_at"`
+}
+
+func tokenStatsKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("sha256:%x", sum[:])
+}
+
+func (tm *TokenManager) loadPersistentStats() {
+	path := filepath.Join(tm.dataDir, "token_stats.json")
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		LogWarn("读取 token 统计失败: %v", err)
+		return
+	}
+	var stats tokenManagerPersistedStats
+	if err := json.Unmarshal(data, &stats); err != nil {
+		LogWarn("解析 token 统计失败: %v", err)
+		return
+	}
+	atomic.StoreInt64(&tm.totalCalls, stats.TotalCalls)
+	atomic.StoreInt64(&tm.successCalls, stats.SuccessCalls)
+	atomic.StoreInt64(&tm.multimodalCount, stats.MultimodalCount)
+	tm.mu.Lock()
+	tm.tokenUseCounts = stats.TokenUseCounts
+	if tm.tokenUseCounts == nil {
+		tm.tokenUseCounts = make(map[string]int64)
+	}
+	tm.mu.Unlock()
+	LogInfo("已加载 token 持久化统计: calls=%d success=%d", stats.TotalCalls, stats.SuccessCalls)
+}
+
+func (tm *TokenManager) savePersistentStats() {
+	tm.mu.RLock()
+	tm.savePersistentStatsLocked()
+	tm.mu.RUnlock()
+}
+
+func (tm *TokenManager) savePersistentStatsLocked() {
+	if err := os.MkdirAll(tm.dataDir, 0755); err != nil {
+		LogWarn("创建 data 目录失败: %v", err)
+		return
+	}
+	useCounts := make(map[string]int64, len(tm.tokenUseCounts)+len(tm.tokens)+len(tm.invalidTokens))
+	for key, count := range tm.tokenUseCounts {
+		useCounts[key] = count
+	}
+	for token, info := range tm.tokens {
+		useCounts[tokenStatsKey(token)] = info.UseCount
+	}
+	for token, info := range tm.invalidTokens {
+		useCounts[tokenStatsKey(token)] = info.UseCount
+	}
+	stats := tokenManagerPersistedStats{
+		TotalCalls:      atomic.LoadInt64(&tm.totalCalls),
+		SuccessCalls:    atomic.LoadInt64(&tm.successCalls),
+		MultimodalCount: atomic.LoadInt64(&tm.multimodalCount),
+		TokenUseCounts:  useCounts,
+		UpdatedAt:       time.Now(),
+	}
+	data, err := json.MarshalIndent(stats, "", "  ")
+	if err != nil {
+		LogWarn("序列化 token 统计失败: %v", err)
+		return
+	}
+	data = append(data, '\n')
+	path := filepath.Join(tm.dataDir, "token_stats.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		LogWarn("写入 token 统计失败: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		LogWarn("保存 token 统计失败: %v", err)
+	}
+}
+
 // RecordCall 记录调用
 func (tm *TokenManager) RecordCall(success bool, isMultimodal bool) {
 	atomic.AddInt64(&tm.totalCalls, 1)
@@ -756,6 +849,7 @@ func (tm *TokenManager) RecordCall(success bool, isMultimodal bool) {
 	if isMultimodal {
 		atomic.AddInt64(&tm.multimodalCount, 1)
 	}
+	tm.savePersistentStats()
 }
 
 // GetStats 获取统计数据

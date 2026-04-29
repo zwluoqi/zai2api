@@ -87,6 +87,7 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 func main() {
 	internal.LoadConfig()
 	internal.InitLogger()
+	internal.LoadTelemetryStats()
 	if err := internal.GetTokenManager().Start(); err != nil {
 		internal.LogError("TokenManager 启动失败: %v", err)
 	}
@@ -105,6 +106,7 @@ func main() {
 	http.HandleFunc("/admin/api/tokens/test", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenTest))))
 	http.HandleFunc("/admin/api/tokens/validate", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminTokenValidate))))
 	http.HandleFunc("/admin/api/endpoints", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminEndpoints))))
+	http.HandleFunc("/admin/api/history", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminHistory))))
 	http.HandleFunc("/admin/api/settings", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminSettings))))
 	addr := ":" + internal.Cfg.Port
 	internal.LogInfo("Server starting on %s", addr)
