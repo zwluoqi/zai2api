@@ -66,7 +66,7 @@ func createAdsPowerProfile(apiBase string, opts *RegisterOptions) (string, error
 	payload := map[string]any{
 		"name":               fmt.Sprintf("zai-register-%d", time.Now().Unix()),
 		"group_id":           opts.AdsPowerGroupID,
-		"user_proxy_config":  adsPowerProxyConfig(opts.Proxy),
+		"user_proxy_config":  adsPowerProxyConfig(opts.BrowserProxy),
 		"fingerprint_config": fp,
 	}
 	data, err := adsPowerPost(apiBase, "/api/v1/user/create", payload)

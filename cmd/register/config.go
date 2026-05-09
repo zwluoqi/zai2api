@@ -14,6 +14,7 @@ type RegisterOptions struct {
 	Count            int
 	Provider         string
 	Proxy            string
+	BrowserProxy     string
 	CodeTimeout      time.Duration
 	PollInterval     time.Duration
 	OutlookFile      string
@@ -59,12 +60,13 @@ type registerConfig struct {
 		SliderOffset float64 `json:"slider_offset"`
 	} `json:"vision"`
 	Browser struct {
-		Provider        string `json:"provider"`
-		AdsPowerAPI     string `json:"adspower_api"`
-		AdsPowerGroupID string `json:"adspower_group_id"`
-		Language        string `json:"language"`
-		Timezone        string `json:"timezone"`
-		UA              string `json:"ua"`
+		Provider        string    `json:"provider"`
+		AdsPowerAPI     string    `json:"adspower_api"`
+		AdsPowerGroupID string    `json:"adspower_group_id"`
+		Language        string    `json:"language"`
+		Timezone        string    `json:"timezone"`
+		UA              string    `json:"ua"`
+		Proxy           proxyList `json:"proxy"`
 	} `json:"browser"`
 }
 
@@ -100,10 +102,12 @@ func LoadRegisterOptions() (*RegisterOptions, error) {
 	visionModelFlag := flag.String("vision-model", "", "图片识别模型")
 	sliderOffsetFlag := flag.Float64("slider-offset", 0, "滑块距离补偿像素，可为负数")
 	browserFlag := flag.String("browser", "", "浏览器类型: adspower | local")
+	browserProxyFlag := flag.String("browser-proxy", "", "仅浏览器使用的代理，多个用逗号分隔时随机选一个；不设置时回退到 --proxy")
 	flag.Parse()
 
 	cfg := loadRegisterConfig(*configPath)
 	proxies := normalizeProxies(resolveString(*proxyFlag, firstNonEmpty(os.Getenv("ZAI_REGISTER_PROXY"), os.Getenv("DEEPSEEK_PROXY")), strings.Join(cfg.Run.Proxy, ","), ""))
+	browserProxies := normalizeProxies(resolveString(*browserProxyFlag, os.Getenv("ZAI_BROWSER_PROXY"), strings.Join(cfg.Browser.Proxy, ","), ""))
 
 	opts := &RegisterOptions{
 		Count:            resolveInt(*countFlag, envInt("ZAI_REGISTER_COUNT"), cfg.Run.Count, 1),
@@ -131,6 +135,11 @@ func LoadRegisterOptions() (*RegisterOptions, error) {
 	}
 	if len(proxies) > 0 {
 		opts.Proxy = proxies[rand.Intn(len(proxies))]
+	}
+	if len(browserProxies) > 0 {
+		opts.BrowserProxy = browserProxies[rand.Intn(len(browserProxies))]
+	} else {
+		opts.BrowserProxy = opts.Proxy
 	}
 	if opts.Count < 1 {
 		return nil, fmt.Errorf("注册数量必须 >= 1")

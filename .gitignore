@@ -27,7 +27,7 @@ main
 *.swp
 *.swo
 *~
-
+worker_push.js
 # Environment files
 .env
 /config.json

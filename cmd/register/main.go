@@ -396,7 +396,7 @@ func NewBrowserRegister(opts *RegisterOptions, mailbox VerificationMailbox, visi
 	return &BrowserRegister{
 		httpClient: NewHTTPClient(opts.Proxy),
 		mailbox:    mailbox,
-		proxy:      opts.Proxy,
+		proxy:      opts.BrowserProxy,
 		timeout:    opts.CodeTimeout,
 		interval:   opts.PollInterval,
 		vision:     vision,
