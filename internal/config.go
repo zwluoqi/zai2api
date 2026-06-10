@@ -44,6 +44,10 @@ type Config struct {
 	Note []string // 多行备注，在 / 显示
 
 	AdminToken string
+
+	// CaptchaVerifyParam 阿里云人机验证 token (base64 JSON)，z.ai v2 chat completions 强制要求；
+	// 为空则不携带（会被服务端拒绝），目前需要手动从浏览器抓包获取。
+	CaptchaVerifyParam string
 }
 
 var Cfg *Config
@@ -214,7 +218,17 @@ func LoadConfig() {
 		Note: parseNoteLines(getEnvString("NOTE", "")),
 
 		AdminToken: getEnvString("ADMIN_TOKEN", ""),
+
+		CaptchaVerifyParam: getEnvString("CAPTCHA_VERIFY_PARAM", ""),
 	}
+}
+
+// GetCaptchaVerifyParam 返回当前配置的阿里云人机验证 token（可能为空）。
+func GetCaptchaVerifyParam() string {
+	if Cfg == nil {
+		return ""
+	}
+	return Cfg.CaptchaVerifyParam
 }
 
 func loadRuntimeFileConfig(path string) runtimeFileConfig {

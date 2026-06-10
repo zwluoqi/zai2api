@@ -8,7 +8,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
-	"net/url"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -25,8 +25,55 @@ func generateRandomIP() string {
 	return fmt.Sprintf("%d.%d.%d.%d", first, rand.Intn(256), rand.Intn(256), rand.Intn(254)+1)
 }
 
+// buildUpstreamURL 构造 chat.z.ai 完整的 query 参数串，模拟浏览器环境指纹。
+// 服务端可能在 signature 校验中包含其中部分字段，缺一不可。
+func buildUpstreamURL(apiEndpoint string, timestamp int64, requestID, userID, token, chatID string) string {
+	now := time.Now().UTC()
+	localTime := now.Format("2006-01-02T15:04:05.000Z")
+	utcTime := now.Format("Mon, 02 Jan 2006 15:04:05 GMT")
+	q := neturl.Values{}
+	q.Set("timestamp", fmt.Sprintf("%d", timestamp))
+	q.Set("requestId", requestID)
+	q.Set("user_id", userID)
+	q.Set("version", "0.0.1")
+	q.Set("platform", "web")
+	q.Set("token", token)
+	q.Set("user_agent", BrowserUserAgent)
+	q.Set("language", "zh-CN")
+	q.Set("languages", "zh-CN,zh,en")
+	q.Set("timezone", "Asia/Shanghai")
+	q.Set("cookie_enabled", "true")
+	q.Set("screen_width", "1920")
+	q.Set("screen_height", "1080")
+	q.Set("screen_resolution", "1920x1080")
+	q.Set("viewport_height", "969")
+	q.Set("viewport_width", "1920")
+	q.Set("viewport_size", "1920x969")
+	q.Set("color_depth", "24")
+	q.Set("pixel_ratio", "1")
+	q.Set("current_url", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))
+	q.Set("pathname", fmt.Sprintf("/c/%s", chatID))
+	q.Set("search", "")
+	q.Set("hash", "")
+	q.Set("host", "chat.z.ai")
+	q.Set("hostname", "chat.z.ai")
+	q.Set("protocol", "https:")
+	q.Set("referrer", "")
+	q.Set("title", "Z.ai - Free AI Chatbot & Agent powered by GLM-5.1 & GLM-5")
+	q.Set("timezone_offset", "-480")
+	q.Set("local_time", localTime)
+	q.Set("utc_time", utcTime)
+	q.Set("is_mobile", "false")
+	q.Set("is_touch", "false")
+	q.Set("max_touch_points", "0")
+	q.Set("browser_name", "Chrome")
+	q.Set("os_name", "Windows")
+	q.Set("signature_timestamp", fmt.Sprintf("%d", timestamp))
+	return apiEndpoint + "?" + q.Encode()
+}
+
 func upstreamURLForLog(rawURL string) string {
-	u, err := url.Parse(rawURL)
+	u, err := neturl.Parse(rawURL)
 	if err != nil {
 		return rawURL
 	}
@@ -187,11 +234,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	signature := GenerateSignature(userID, requestID, latestUserContent, timestamp)
 
 	apiEndpoint := GetAPIEndpoint()
-	url := fmt.Sprintf("%s?timestamp=%d&requestId=%s&user_id=%s&version=0.0.1&platform=web&token=%s&current_url=%s&pathname=%s&signature_timestamp=%d",
-		apiEndpoint, timestamp, requestID, userID, token,
-		fmt.Sprintf("https://chat.z.ai/c/%s", chatID),
-		fmt.Sprintf("/c/%s", chatID),
-		timestamp)
+	url := buildUpstreamURL(apiEndpoint, timestamp, requestID, userID, token, chatID)
 
 	urlToFileID := make(map[string]string)
 	var filesData []map[string]interface{}
@@ -250,22 +293,46 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		upstreamMessages = append(upstreamMessages, msg.ToUpstreamMessage(urlToFileID))
 	}
 
+	nowLocal := time.Now()
 	body := map[string]interface{}{
 		"stream":           true,
 		"model":            targetModel,
 		"messages":         upstreamMessages,
 		"signature_prompt": latestUserContent,
 		"params":           map[string]interface{}{},
+		"extra":            map[string]interface{}{},
 		"features": map[string]interface{}{
-			"image_generation": true,
-			"web_search":       true,
-			"auto_web_search":  autoWebSearch && !hasTools,
-			"preview_mode":     false,
-			"flags":            []string{},
-			"enable_thinking":  enableThinking,
+			"image_generation":      true,
+			"web_search":            true,
+			"auto_web_search":       autoWebSearch && !hasTools,
+			"preview_mode":          true,
+			"flags":                 []string{},
+			"vlm_tools_enable":      false,
+			"vlm_web_search_enable": false,
+			"vlm_website_mode":      false,
+			"enable_thinking":       enableThinking,
 		},
-		"chat_id": chatID,
-		"id":      uuid.New().String(),
+		"variables": map[string]interface{}{
+			"{{USER_NAME}}":        "Guest",
+			"{{USER_LOCATION}}":    "Unknown",
+			"{{CURRENT_DATETIME}}": nowLocal.Format("2006-01-02 15:04:05"),
+			"{{CURRENT_DATE}}":     nowLocal.Format("2006-01-02"),
+			"{{CURRENT_TIME}}":     nowLocal.Format("15:04:05"),
+			"{{CURRENT_WEEKDAY}}":  nowLocal.Weekday().String(),
+			"{{CURRENT_TIMEZONE}}": "Asia/Shanghai",
+			"{{USER_LANGUAGE}}":    "zh-CN",
+		},
+		"chat_id":                        chatID,
+		"id":                             uuid.New().String(),
+		"current_user_message_id":        userMsgID,
+		"current_user_message_parent_id": nil,
+		"background_tasks": map[string]interface{}{
+			"title_generation": true,
+			"tags_generation":  true,
+		},
+	}
+	if cap := GetCaptchaVerifyParam(); cap != "" {
+		body["captcha_verify_param"] = cap
 	}
 
 	if len(mcpServers) > 0 {
@@ -274,7 +341,6 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 
 	if len(filesData) > 0 {
 		body["files"] = filesData
-		body["current_user_message_id"] = userMsgID
 		LogDebug("[Upstream] Attaching %d files to request, userMsgID=%s", len(filesData), userMsgID)
 		for i, fd := range filesData {
 			LogDebug("[Upstream] File %d: id=%v, type=%v, name=%v, status=%v", i+1, fd["id"], fd["type"], fd["name"], fd["status"])
@@ -291,6 +357,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-FE-Version", GetFeVersion())
 	req.Header.Set("X-Signature", signature)
+	req.Header.Set("X-Region", "overseas")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))

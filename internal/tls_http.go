@@ -10,11 +10,11 @@ import (
 	"github.com/bogdanfinn/tls-client/profiles"
 )
 
-// DefaultBrowserProfile 与 tls-client 内置 Chrome_133 一致（ClientHello、HTTP/2 SETTINGS/优先级/伪头序等），便于 JA3/JA4 与 HTTP/2 指纹对齐。
-var DefaultBrowserProfile = profiles.Chrome_133
+// DefaultBrowserProfile 与 tls-client 内置 Chrome_146 一致（ClientHello、HTTP/2 SETTINGS/优先级/伪头序等），便于 JA3/JA4 与 HTTP/2 指纹对齐。
+var DefaultBrowserProfile = profiles.Chrome_146
 
 // BrowserUserAgent 必须与 DefaultBrowserProfile 同源，勿随机替换，否则与 TLS 指纹不一致。
-const BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+const BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
 var (
 	chromeGetHeaderOrder = []string{
@@ -83,7 +83,7 @@ func TLSHTTPClientWithProxy(timeout time.Duration, proxyURL string) (tls_client.
 // ApplyBrowserFingerprintHeaders 设置与 Chrome 133 一致的 User-Agent 与 Sec-CH-UA（配合 TLSHTTPClient 的 TLS/H2 指纹）。
 func ApplyBrowserFingerprintHeaders(h fhttp.Header) {
 	h.Set("User-Agent", BrowserUserAgent)
-	h.Set("sec-ch-ua", `"Google Chrome";v="133", "Chromium";v="133", "Not A(Brand";v="24"`)
+	h.Set("sec-ch-ua", `"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`)
 	h.Set("sec-ch-ua-mobile", "?0")
 	h.Set("sec-ch-ua-platform", `"Windows"`)
 }
