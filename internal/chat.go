@@ -361,6 +361,9 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))
+	if cookie := GetWAFCookie(); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
 	ApplyBrowserFetchHeaders(req.Header, true)
 	if Cfg.SpoofClientIP {
 		randomIP := generateRandomIP()
@@ -1511,7 +1514,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 		}
 		if upstream.HasError() {
 			upstreamError = upstream.GetErrorMessage()
-			LogError("Upstream error: %s", upstreamError)
+			LogError("Upstream error: code=%s detail=%s", upstream.Data.Error.Code, upstreamError)
 			result.Success = false
 			result.ErrorMessage = upstreamError
 			if result.ResponseStarted {
@@ -1985,7 +1988,7 @@ func handleNonStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser,
 		// 检测上游错误
 		if upstream.HasError() {
 			upstreamError = upstream.GetErrorMessage()
-			LogError("Upstream error: %s", upstreamError)
+			LogError("Upstream error: code=%s detail=%s", upstream.Data.Error.Code, upstreamError)
 			result.Success = false
 			result.ErrorMessage = upstreamError
 			return result

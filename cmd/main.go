@@ -95,6 +95,7 @@ func main() {
 	internal.StartAnonymousTokenPool()
 	internal.StartVersionUpdater()
 	internal.StartModelFetcher()
+	internal.StartCaptchaGenerator()
 	http.HandleFunc("/", corsMiddleware(loggingMiddleware(handleRoot)))
 	http.HandleFunc("/v1/models", corsMiddleware(loggingMiddleware(internal.HandleModels)))
 	http.HandleFunc("/v1/chat/completions", corsMiddleware(loggingMiddleware(internal.HandleChatCompletions)))

@@ -45,9 +45,19 @@ type Config struct {
 
 	AdminToken string
 
-	// CaptchaVerifyParam 阿里云人机验证 token (base64 JSON)，z.ai v2 chat completions 强制要求；
-	// 为空则不携带（会被服务端拒绝），目前需要手动从浏览器抓包获取。
+	// CaptchaVerifyParam 阿里云人机验证 token (base64 JSON)，z.ai v2 chat completions 强制要求。
+	// 手动兜底：非空时直接使用（一般仅用于临时抓包验证）；留空则走下面的自动生成池。
 	CaptchaVerifyParam string
+
+	// Captcha 自动生成（无头浏览器复刻阿里云无痕验证，见 captcha.go）
+	CaptchaAutoGen           bool
+	CaptchaHeadless          bool
+	CaptchaBrowserBin        string
+	CaptchaPoolSize          int
+	CaptchaGenTimeoutSeconds int
+	CaptchaSceneID           string
+	CaptchaPrefix            string
+	CaptchaRegion            string
 }
 
 var Cfg *Config
@@ -220,15 +230,28 @@ func LoadConfig() {
 		AdminToken: getEnvString("ADMIN_TOKEN", ""),
 
 		CaptchaVerifyParam: getEnvString("CAPTCHA_VERIFY_PARAM", ""),
+
+		CaptchaAutoGen:           getEnvBool("CAPTCHA_AUTO_GEN", false),
+		CaptchaHeadless:          getEnvBool("CAPTCHA_HEADLESS", true),
+		CaptchaBrowserBin:        getEnvString("CAPTCHA_BROWSER_BIN", ""),
+		CaptchaPoolSize:          getEnvInt("CAPTCHA_POOL_SIZE", 4),
+		CaptchaGenTimeoutSeconds: getEnvInt("CAPTCHA_GEN_TIMEOUT_SECONDS", 20),
+		CaptchaSceneID:           getEnvString("CAPTCHA_SCENE_ID", ""),
+		CaptchaPrefix:            getEnvString("CAPTCHA_PREFIX", ""),
+		CaptchaRegion:            getEnvString("CAPTCHA_REGION", ""),
 	}
 }
 
-// GetCaptchaVerifyParam 返回当前配置的阿里云人机验证 token（可能为空）。
+// GetCaptchaVerifyParam 返回一个阿里云人机验证 token：优先手动配置（CAPTCHA_VERIFY_PARAM），
+// 否则从自动生成池取用一个新鲜的一次性 token；都没有则返回空。
 func GetCaptchaVerifyParam() string {
 	if Cfg == nil {
 		return ""
 	}
-	return Cfg.CaptchaVerifyParam
+	if Cfg.CaptchaVerifyParam != "" {
+		return Cfg.CaptchaVerifyParam
+	}
+	return getCaptchaFromPool()
 }
 
 func loadRuntimeFileConfig(path string) runtimeFileConfig {

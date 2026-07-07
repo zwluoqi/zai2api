@@ -72,6 +72,14 @@ AUTH_TOKEN=your-api-key
 | `TOOL_SUPPORT` | true | 工具调用支持 |
 | `RETRY_COUNT` | 5 | 请求失败时的重试次数（不含首次请求） |
 | `LOG_LEVEL` | info | 日志级别：debug/info/warn/error |
+| `CAPTCHA_AUTO_GEN` | false | 自动生成阿里云人机验证 token（无头浏览器复刻无痕验证），z.ai v2 chat completions 现已强制要求 |
+| `CAPTCHA_HEADLESS` | true | captcha 生成器是否无头运行（VPS 无显示环境保持 true；如需更高通过率可配合 xvfb 设为 false） |
+| `CAPTCHA_BROWSER_BIN` | - | Chromium/Chrome 可执行文件路径，留空则自动探测 |
+| `CAPTCHA_POOL_SIZE` | 4 | captcha token 预热池大小（token 一次性，取用即消费） |
+| `CAPTCHA_GEN_TIMEOUT_SECONDS` | 20 | 单个 token 生成超时 |
+| `CAPTCHA_VERIFY_PARAM` | - | 手动兜底 captcha token（非空时优先，仅用于临时抓包验证） |
+
+> **人机验证说明**：z.ai 已对 `/api/v2/chat/completions` 强制阿里云验证码（无痕验证）。开启 `CAPTCHA_AUTO_GEN=true` 后，服务会用内嵌无头浏览器（依赖已有的 go-rod）复刻前端的阿里云 SDK 流程，自动产出并预热 `captcha_verify_param`；同时会自动携带 Aliyun WAF 网关 cookie（`acw_tc`/`cdn_sec_tc`）。需要运行环境能安装 Chromium（VPS/Docker），Cloudflare Worker 无法运行无头浏览器。
 
 完整配置请参考 [.env.example](.env.example)
 
