@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 )
 
 const adminHTML = `<!doctype html>
@@ -128,6 +129,12 @@ const adminHTML = `<!doctype html>
     <div id="viewSettings" class="view">
       <section>
         <h2>系统设置</h2>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+          <label>Token 重试次数（默认 0）<br><input id="setRetryCount" type="number" min="0" style="width:120px"></label>
+          <label>模型降级链（逗号分隔，撞容量满/无权限时依次降级）<br><input id="setModelFallbacks" style="min-width:340px" placeholder="GLM-5-Turbo,GLM-4.6"></label>
+          <button onclick="saveSettings()">保存</button>
+          <span id="settingsMsg"></span>
+        </div>
         <pre id="settings"></pre>
       </section>
     </div>
@@ -193,7 +200,22 @@ async function loadEndpoints(){
     return '<tr><td class="token">'+escapeHtml(endpoint)+'</td><td>'+status+'</td><td>'+del+'</td></tr>';
   }).join('');
 }
-async function loadSettings(){ settings.textContent = JSON.stringify(await api('/admin/api/settings'), null, 2); }
+async function loadSettings(){
+  const s = await api('/admin/api/settings');
+  document.getElementById('setRetryCount').value = s.retry_count ?? 0;
+  document.getElementById('setModelFallbacks').value = (s.model_fallbacks || []).join(', ');
+  settings.textContent = JSON.stringify(s, null, 2);
+}
+async function saveSettings(){
+  const msg = document.getElementById('settingsMsg');
+  const rc = parseInt(document.getElementById('setRetryCount').value, 10);
+  const fb = document.getElementById('setModelFallbacks').value.split(',').map(x=>x.trim()).filter(Boolean);
+  try {
+    await api('/admin/api/settings', {method:'POST', body:JSON.stringify({retry_count: isNaN(rc)?0:rc, model_fallbacks: fb})});
+    msg.textContent = '已保存 ✓';
+  } catch(e) { msg.textContent = '保存失败: ' + e.message; }
+  loadSettings();
+}
 async function addToken(){ await api('/admin/api/tokens',{method:'POST',body:JSON.stringify({token:newToken.value})}); newToken.value=''; loadAccount(); }
 async function addEndpoint(){ const endpoint = newEndpoint.value.trim(); if(!endpoint) return; await api('/admin/api/endpoints',{method:'POST',body:JSON.stringify({endpoint})}); newEndpoint.value=''; loadAccount(); }
 async function deleteEndpoint(endpoint){ if(!confirm('删除 '+endpoint+' ?')) return; await api('/admin/api/endpoints',{method:'DELETE',body:JSON.stringify({endpoint})}); loadAccount(); }
@@ -517,6 +539,37 @@ func parsePositiveInt(value string, fallback int) int {
 }
 
 func HandleAdminSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var req struct {
+			RetryCount     *int      `json:"retry_count"`
+			ModelFallbacks *[]string `json:"model_fallbacks"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var fallbacks []string
+		updateFallbacks := req.ModelFallbacks != nil
+		if updateFallbacks {
+			for _, m := range *req.ModelFallbacks {
+				m = strings.TrimSpace(m)
+				if m == "" {
+					continue
+				}
+				if !IsValidModel(m) {
+					http.Error(w, "无效的备用模型: "+m, http.StatusBadRequest)
+					return
+				}
+				fallbacks = append(fallbacks, m)
+			}
+		}
+		if err := UpdateRuntimeSettings(req.RetryCount, fallbacks, updateFallbacks); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// 落回 GET 返回最新设置
+	}
+
 	endpoints := GetAPIEndpoints()
 	writeJSON(w, map[string]any{
 		"port":            Cfg.Port,
@@ -527,7 +580,8 @@ func HandleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		"backup_tokens":   len(Cfg.BackupTokens),
 		"debug_logging":   Cfg.DebugLogging,
 		"tool_support":    Cfg.ToolSupport,
-		"retry_count":     Cfg.RetryCount,
+		"retry_count":     GetRetryCount(),
+		"model_fallbacks": GetModelFallbacks(),
 		"skip_auth_token": Cfg.SkipAuthToken,
 		"scan_limit":      Cfg.ScanLimit,
 		"log_level":       Cfg.LogLevel,

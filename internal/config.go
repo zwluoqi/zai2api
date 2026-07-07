@@ -26,13 +26,15 @@ type Config struct {
 	BackupTokens []string // 支持多个 Backup Token（用于多模态，逗号分隔）
 
 	// Feature Configuration
-	DebugLogging  bool
-	ToolSupport   bool
-	RetryCount    int
-	SkipAuthToken bool
-	ScanLimit     int
-	LogLevel      string
-	SpoofClientIP bool
+	DebugLogging bool
+	ToolSupport  bool
+	RetryCount   int
+	// ModelFallbacks 模型降级链：当请求模型返回容量满/账号无权限时，依次降级到这些备用模型
+	ModelFallbacks []string
+	SkipAuthToken  bool
+	ScanLimit      int
+	LogLevel       string
+	SpoofClientIP  bool
 
 	// 匿名 token 池（无 TokenManager / BACKUP_TOKEN 时启用；已配置上游 token 时不使用池）
 	AnonymousPoolSize               int
@@ -71,7 +73,13 @@ type runtimeFileConfig struct {
 		Endpoint  string   `json:"endpoint"`
 		Endpoints []string `json:"endpoints"`
 	} `json:"api"`
+	// 可在管理面板「系统设置」中编辑并持久化到 config.json 的运行时设置
+	RetryCount     *int     `json:"retry_count"`
+	ModelFallbacks []string `json:"model_fallbacks"`
 }
+
+// settingsMu 保护可在运行时（管理面板）热更新的设置字段：RetryCount、ModelFallbacks
+var settingsMu sync.RWMutex
 
 func getEnvString(key, defaultVal string) string {
 	if val := os.Getenv(key); val != "" {
@@ -211,13 +219,14 @@ func LoadConfig() {
 		BackupTokens: getEnvStringSlice("BACKUP_TOKEN"),
 
 		// Feature Configuration
-		DebugLogging:  getEnvBool("DEBUG_LOGGING", false),
-		ToolSupport:   getEnvBool("TOOL_SUPPORT", true),
-		RetryCount:    getEnvInt("RETRY_COUNT", 5),
-		SkipAuthToken: getEnvBool("SKIP_AUTH_TOKEN", false),
-		ScanLimit:     getEnvInt("SCAN_LIMIT", 200000),
-		LogLevel:      getEnvString("LOG_LEVEL", "info"),
-		SpoofClientIP: getEnvBool("SPOOF_CLIENT_IP", false),
+		DebugLogging:   getEnvBool("DEBUG_LOGGING", false),
+		ToolSupport:    getEnvBool("TOOL_SUPPORT", true),
+		RetryCount:     getEnvInt("RETRY_COUNT", 0),
+		ModelFallbacks: parseStringList(getEnvString("MODEL_FALLBACKS", "GLM-5-Turbo")),
+		SkipAuthToken:  getEnvBool("SKIP_AUTH_TOKEN", false),
+		ScanLimit:      getEnvInt("SCAN_LIMIT", 200000),
+		LogLevel:       getEnvString("LOG_LEVEL", "info"),
+		SpoofClientIP:  getEnvBool("SPOOF_CLIENT_IP", false),
 
 		AnonymousPoolSize:               getEnvInt("ANONYMOUS_POOL_SIZE", 4),
 		AnonymousTokenTTLSeconds:        getEnvInt("ANONYMOUS_TOKEN_TTL_SECONDS", 1200),
@@ -240,6 +249,84 @@ func LoadConfig() {
 		CaptchaPrefix:            getEnvString("CAPTCHA_PREFIX", ""),
 		CaptchaRegion:            getEnvString("CAPTCHA_REGION", ""),
 	}
+
+	// config.json 中的运行时设置优先于 env 默认（由管理面板「系统设置」写入）
+	if fileCfg.RetryCount != nil {
+		Cfg.RetryCount = *fileCfg.RetryCount
+	}
+	if fileCfg.ModelFallbacks != nil {
+		Cfg.ModelFallbacks = fileCfg.ModelFallbacks
+	}
+}
+
+// GetRetryCount 返回当前 token 重试次数（线程安全，可被管理面板热更新）。
+func GetRetryCount() int {
+	settingsMu.RLock()
+	defer settingsMu.RUnlock()
+	if Cfg == nil {
+		return 0
+	}
+	if Cfg.RetryCount < 0 {
+		return 0
+	}
+	return Cfg.RetryCount
+}
+
+// GetModelFallbacks 返回当前模型降级链的副本（线程安全，可被管理面板热更新）。
+func GetModelFallbacks() []string {
+	settingsMu.RLock()
+	defer settingsMu.RUnlock()
+	if Cfg == nil {
+		return nil
+	}
+	return append([]string(nil), Cfg.ModelFallbacks...)
+}
+
+// UpdateRuntimeSettings 热更新可编辑的运行时设置并持久化到 config.json。
+// 传 nil 表示不改动对应项。
+func UpdateRuntimeSettings(retryCount *int, modelFallbacks []string, updateFallbacks bool) error {
+	settingsMu.Lock()
+	if retryCount != nil {
+		rc := *retryCount
+		if rc < 0 {
+			rc = 0
+		}
+		Cfg.RetryCount = rc
+	}
+	if updateFallbacks {
+		Cfg.ModelFallbacks = modelFallbacks
+	}
+	rc := Cfg.RetryCount
+	fb := append([]string(nil), Cfg.ModelFallbacks...)
+	path := Cfg.ConfigPath
+	settingsMu.Unlock()
+	return writeConfigSettings(path, rc, fb)
+}
+
+// writeConfigSettings 将运行时设置合并写入 config.json（保留其他配置段）。
+func writeConfigSettings(path string, retryCount int, fallbacks []string) error {
+	if path == "" {
+		return nil
+	}
+	root := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &root); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	root["retry_count"] = retryCount
+	if fallbacks == nil {
+		fallbacks = []string{}
+	}
+	root["model_fallbacks"] = fallbacks
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(path, data, 0644)
 }
 
 // GetCaptchaVerifyParam 返回一个阿里云人机验证 token：优先手动配置（CAPTCHA_VERIFY_PARAM），

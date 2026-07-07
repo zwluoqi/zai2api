@@ -176,6 +176,44 @@ func extractAllMediaURLs(messages []Message) (imageURLs, videoURLs []string) {
 	return imageURLs, videoURLs
 }
 
+// shouldFallbackModel 判断上游错误是否属于「模型级」（容量满/账号无权限），此类应降级到备用模型而非重试同一模型。
+func shouldFallbackModel(code, message string) bool {
+	if code == "MODEL_CONCURRENCY_LIMIT" {
+		return true
+	}
+	// 账号等级无该模型权限：有时 code 为数字无法解析到字符串，靠文案兜底
+	msg := strings.ToLower(message)
+	if strings.Contains(msg, "not available for current user level") ||
+		strings.Contains(msg, "user level") ||
+		strings.Contains(message, "无权限") {
+		return true
+	}
+	return false
+}
+
+// buildModelChain 构造模型尝试链：请求模型在前，其后依次为配置的备用模型（去重、跳过无效/同名）。
+func buildModelChain(requested string) []string {
+	chain := []string{requested}
+	seen := map[string]bool{strings.ToLower(requested): true}
+	for _, fb := range GetModelFallbacks() {
+		fb = strings.TrimSpace(fb)
+		if fb == "" {
+			continue
+		}
+		key := strings.ToLower(fb)
+		if seen[key] {
+			continue
+		}
+		if !IsValidModel(fb) {
+			LogWarn("跳过无效的备用模型: %s", fb)
+			continue
+		}
+		seen[key] = true
+		chain = append(chain, fb)
+	}
+	return chain
+}
+
 func makeUpstreamRequest(token string, messages []Message, model string, imageURLs, videoURLs []string, hasTools bool) (*fhttp.Response, string, error) {
 	payload, err := DecodeJWTPayload(token)
 	if err != nil || payload == nil {
@@ -423,6 +461,7 @@ type UpstreamResult struct {
 	HasContent       bool
 	ResponseStarted  bool
 	ErrorMessage     string
+	ErrorCode        string
 	OutputTokens     int64
 	Content          string
 	ReasoningContent string
@@ -665,73 +704,92 @@ func HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var lastResult UpstreamResult
 	success := false
 
-	// 重试循环
-	maxRetries := max(Cfg.RetryCount, 0)
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			// 重试时获取新 token
-			if newToken := GetTokenManager().GetToken(); newToken != "" && newToken != token {
-				token = newToken
-				LogInfo("Retry %d/%d with new token", attempt, maxRetries)
+	// 模型降级链：请求模型 + 配置的备用模型（撞容量/权限时逐个降级）。
+	// 每个模型内部按 RetryCount（默认 0，即不额外重试）做 token 重试。
+	modelChain := buildModelChain(req.Model)
+	maxRetries := GetRetryCount()
+
+modelLoop:
+	for mi, tryModel := range modelChain {
+		if mi > 0 {
+			LogInfo("模型降级：%s -> %s", req.Model, tryModel)
+		}
+		modelLevelFail := false
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			if attempt > 0 {
+				// 重试时获取新 token
+				if newToken := GetTokenManager().GetToken(); newToken != "" && newToken != token {
+					token = newToken
+					LogInfo("Retry %d/%d with new token", attempt, maxRetries)
+				} else {
+					LogInfo("Retry %d/%d with same token", attempt, maxRetries)
+				}
+			}
+
+			resp, modelName, err := makeUpstreamRequest(token, messages, tryModel, reqImageURLs, reqVideoURLs, len(req.Tools) > 0)
+			if err != nil {
+				LogError("Upstream request failed (model=%s attempt %d): %v", tryModel, attempt+1, err)
+				lastError = err.Error()
+				continue
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				LogError("Upstream error (model=%s attempt %d): status=%d, content_type=%s, server=%s, trace_id=%s, body=%s",
+					tryModel, attempt+1, resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Server"), resp.Header.Get("X-Trace-Id"), string(body)[:min(500, len(body))])
+				lastError = fmt.Sprintf("status %d", resp.StatusCode)
+				// 非 5xx 错误不重试
+				if resp.StatusCode < 500 {
+					GetTokenManager().RecordCall(false, isMultimodal)
+					history.FinishFailed(modelName, 0, fmt.Sprintf("upstream status %d: %s", resp.StatusCode, string(body)[:min(500, len(body))]), nil)
+					recordTelemetry(0)
+					writeUpstreamError(w, resp.StatusCode, body)
+					return
+				}
+				continue
+			}
+
+			usedModelName = modelName
+			var result UpstreamResult
+			if req.Stream {
+				result = handleStreamResponseWithRetry(w, resp.Body, completionID, modelName, inputTokens, includeUsage, req.Tools, mi == 0 && attempt == 0)
 			} else {
-				LogInfo("Retry %d/%d with same token", attempt, maxRetries)
+				result = handleNonStreamResponseWithRetry(w, resp.Body, completionID, modelName, inputTokens, req.Tools)
 			}
-		}
-
-		resp, modelName, err := makeUpstreamRequest(token, messages, req.Model, reqImageURLs, reqVideoURLs, len(req.Tools) > 0)
-		if err != nil {
-			LogError("Upstream request failed (attempt %d): %v", attempt+1, err)
-			lastError = err.Error()
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			LogError("Upstream error (attempt %d): status=%d, content_type=%s, server=%s, trace_id=%s, body=%s",
-				attempt+1, resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Server"), resp.Header.Get("X-Trace-Id"), string(body)[:min(500, len(body))])
-			lastError = fmt.Sprintf("status %d", resp.StatusCode)
-			// 非 5xx 错误不重试
-			if resp.StatusCode < 500 {
-				GetTokenManager().RecordCall(false, isMultimodal)
-				history.FinishFailed(modelName, 0, fmt.Sprintf("upstream status %d: %s", resp.StatusCode, string(body)[:min(500, len(body))]), nil)
-				recordTelemetry(0)
-				writeUpstreamError(w, resp.StatusCode, body)
-				return
+
+			outputTokens = result.OutputTokens
+			lastResult = result
+
+			if result.Success && result.HasContent {
+				success = true
+				break modelLoop
 			}
-			continue
+
+			if result.ErrorMessage != "" {
+				lastError = result.ErrorMessage
+				LogWarn("Upstream returned error (model=%s attempt %d): code=%s %s", tryModel, attempt+1, result.ErrorCode, result.ErrorMessage)
+			} else if !result.HasContent {
+				lastError = "empty response"
+				LogWarn("Upstream returned empty content (model=%s attempt %d)", tryModel, attempt+1)
+			}
+
+			// 流式请求已开始写入，无法重试/降级
+			if req.Stream && result.ResponseStarted {
+				LogDebug("Stream response already started, cannot retry/fallback")
+				break modelLoop
+			}
+
+			// 模型级错误（容量满/账号无权限）：跳过剩余 token 重试，直接降级到下一个备用模型
+			if shouldFallbackModel(result.ErrorCode, result.ErrorMessage) {
+				modelLevelFail = true
+				break
+			}
 		}
-
-		usedModelName = modelName
-		var result UpstreamResult
-		if req.Stream {
-			result = handleStreamResponseWithRetry(w, resp.Body, completionID, modelName, inputTokens, includeUsage, req.Tools, attempt == 0)
-		} else {
-			result = handleNonStreamResponseWithRetry(w, resp.Body, completionID, modelName, inputTokens, req.Tools)
-		}
-		resp.Body.Close()
-
-		outputTokens = result.OutputTokens
-		lastResult = result
-
-		if result.Success && result.HasContent {
-			success = true
-			break
-		}
-
-		// 检查是否需要重试
-		if result.ErrorMessage != "" {
-			lastError = result.ErrorMessage
-			LogWarn("Upstream returned error (attempt %d): %s", attempt+1, result.ErrorMessage)
-		} else if !result.HasContent {
-			lastError = "empty response"
-			LogWarn("Upstream returned empty content (attempt %d)", attempt+1)
-		}
-
-		// 流式请求已开始写入，无法重试
-		if req.Stream && result.ResponseStarted {
-			LogDebug("Stream response already started, cannot retry")
-			break
+		// 只有模型级错误才降级；其他错误（如 captcha/网关）降级也无济于事，直接结束
+		if !modelLevelFail {
+			break modelLoop
 		}
 	}
 
@@ -1517,6 +1575,7 @@ func handleStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser, co
 			LogError("Upstream error: code=%s detail=%s", upstream.Data.Error.Code, upstreamError)
 			result.Success = false
 			result.ErrorMessage = upstreamError
+			result.ErrorCode = upstream.Data.Error.Code
 			if result.ResponseStarted {
 				errContent := fmt.Sprintf("[上游服务错误: %s]", upstreamError)
 				errChunk := ChatCompletionChunk{
@@ -1991,6 +2050,7 @@ func handleNonStreamResponseWithRetry(w http.ResponseWriter, body io.ReadCloser,
 			LogError("Upstream error: code=%s detail=%s", upstream.Data.Error.Code, upstreamError)
 			result.Success = false
 			result.ErrorMessage = upstreamError
+			result.ErrorCode = upstream.Data.Error.Code
 			return result
 		}
 
