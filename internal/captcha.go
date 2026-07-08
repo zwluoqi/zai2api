@@ -2,6 +2,10 @@ package internal
 
 import (
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,8 +39,9 @@ const (
 type captchaGenerator struct {
 	tokens chan string
 
-	mu      sync.Mutex
-	browser *rod.Browser
+	mu          sync.Mutex
+	browser     *rod.Browser
+	proxyExtDir string // 代理鉴权扩展临时目录（浏览器销毁时清理）
 
 	scene   string
 	prefix  string
@@ -144,8 +149,30 @@ func (g *captchaGenerator) ensureBrowser() (*rod.Browser, error) {
 		Set("no-sandbox", "true").
 		Set("disable-blink-features", "AutomationControlled").
 		Set("disable-gpu", "true")
+
+	// 走代理（建议住宅 IP）：token 风险分在生成时按设备指纹+IP 打分，
+	// 机房 IP 会被阿里云判高风险导致 verify_failed。
+	if proxy := Cfg.CaptchaBrowserProxy; proxy != "" {
+		server, extDir, err := configureCaptchaProxy(proxy)
+		if err != nil {
+			return nil, fmt.Errorf("配置 captcha 代理: %w", err)
+		}
+		if server != "" {
+			l = l.Set("proxy-server", server)
+		}
+		if extDir != "" {
+			l = l.Set("disable-extensions-except", extDir).Set("load-extension", extDir)
+			g.proxyExtDir = extDir
+		}
+		LogInfo("captcha 生成器使用代理: %s", server)
+	}
+
 	u, err := l.Launch()
 	if err != nil {
+		if g.proxyExtDir != "" {
+			_ = os.RemoveAll(g.proxyExtDir)
+			g.proxyExtDir = ""
+		}
 		return nil, fmt.Errorf("启动浏览器: %w", err)
 	}
 
@@ -204,6 +231,54 @@ func (g *captchaGenerator) teardown() {
 		_ = g.browser.Close()
 	}
 	g.browser = nil
+	if g.proxyExtDir != "" {
+		_ = os.RemoveAll(g.proxyExtDir)
+		g.proxyExtDir = ""
+	}
+}
+
+// configureCaptchaProxy 解析代理地址，返回 proxy-server 值及（含账号密码时）鉴权扩展目录。
+func configureCaptchaProxy(rawProxy string) (string, string, error) {
+	proxyURL, err := url.Parse(rawProxy)
+	if err != nil {
+		return "", "", fmt.Errorf("代理地址格式错误: %w", err)
+	}
+	if proxyURL.Scheme == "" || proxyURL.Host == "" {
+		return "", "", fmt.Errorf("代理地址需包含协议和主机，例如 http://host:port")
+	}
+	server := proxyURL.Scheme + "://" + proxyURL.Host
+	if proxyURL.User == nil {
+		return server, "", nil
+	}
+	username := proxyURL.User.Username()
+	password, _ := proxyURL.User.Password()
+	extDir, err := os.MkdirTemp("", "zai-captcha-proxy-*")
+	if err != nil {
+		return "", "", err
+	}
+	manifest := `{
+  "version": "1.0.0",
+  "manifest_version": 2,
+  "name": "zai-captcha-proxy-auth",
+  "permissions": ["proxy", "tabs", "unlimitedStorage", "storage", "<all_urls>", "webRequest", "webRequestBlocking"],
+  "background": {"scripts": ["background.js"]}
+}`
+	background := fmt.Sprintf(`
+chrome.webRequest.onAuthRequired.addListener(
+  function() { return {authCredentials: {username: %q, password: %q}}; },
+  {urls: ["<all_urls>"]},
+  ["blocking"]
+);
+`, username, password)
+	if err := os.WriteFile(filepath.Join(extDir, "manifest.json"), []byte(manifest), 0644); err != nil {
+		_ = os.RemoveAll(extDir)
+		return "", "", err
+	}
+	if err := os.WriteFile(filepath.Join(extDir, "background.js"), []byte(strings.TrimSpace(background)), 0644); err != nil {
+		_ = os.RemoveAll(extDir)
+		return "", "", err
+	}
+	return server, extDir, nil
 }
 
 // setupJS 一次性注入：加载 SDK、初始化无痕验证、暴露 window.__getCaptchaToken()。

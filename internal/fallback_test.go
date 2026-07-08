@@ -35,6 +35,24 @@ func TestBuildModelChain(t *testing.T) {
 	}
 }
 
+func TestConfigureCaptchaProxy(t *testing.T) {
+	// 无账号密码：只返回 server，无扩展目录
+	server, extDir, err := configureCaptchaProxy("http://1.2.3.4:8080")
+	if err != nil || server != "http://1.2.3.4:8080" || extDir != "" {
+		t.Fatalf("got server=%q extDir=%q err=%v", server, extDir, err)
+	}
+	// 含账号密码：返回 server + 鉴权扩展目录
+	server, extDir, err = configureCaptchaProxy("http://u:p@1.2.3.4:8080")
+	if err != nil || server != "http://1.2.3.4:8080" || extDir == "" {
+		t.Fatalf("got server=%q extDir=%q err=%v", server, extDir, err)
+	}
+	os.RemoveAll(extDir)
+	// 非法地址报错
+	if _, _, err := configureCaptchaProxy("not-a-url"); err == nil {
+		t.Fatal("expected error for invalid proxy")
+	}
+}
+
 func TestShouldFallbackModel(t *testing.T) {
 	cases := []struct {
 		code, msg string

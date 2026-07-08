@@ -55,6 +55,7 @@ type Config struct {
 	CaptchaAutoGen           bool
 	CaptchaHeadless          bool
 	CaptchaBrowserBin        string
+	CaptchaBrowserProxy      string // 生成 captcha 的浏览器走此代理（建议住宅 IP，规避阿里云对机房 IP 的风控）
 	CaptchaPoolSize          int
 	CaptchaGenTimeoutSeconds int
 	CaptchaSceneID           string
@@ -243,6 +244,7 @@ func LoadConfig() {
 		CaptchaAutoGen:           getEnvBool("CAPTCHA_AUTO_GEN", false),
 		CaptchaHeadless:          getEnvBool("CAPTCHA_HEADLESS", true),
 		CaptchaBrowserBin:        getEnvString("CAPTCHA_BROWSER_BIN", ""),
+		CaptchaBrowserProxy:      getEnvString("CAPTCHA_BROWSER_PROXY", ""),
 		CaptchaPoolSize:          getEnvInt("CAPTCHA_POOL_SIZE", 4),
 		CaptchaGenTimeoutSeconds: getEnvInt("CAPTCHA_GEN_TIMEOUT_SECONDS", 20),
 		CaptchaSceneID:           getEnvString("CAPTCHA_SCENE_ID", ""),
