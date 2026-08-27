@@ -87,6 +87,7 @@ func initBuiltinMappings() {
 	registerBuiltinModel("GLM-5-Turbo", "GLM-5-Turbo", "GLM-5-Turbo", true, false, true, []string{"advanced-search"})
 	registerBuiltinModel("GLM-5v-Turbo", "GLM-5v-Turbo", "GLM-5v-Turbo", true, false, true, []string{"advanced-search", "vlm-image-search", "vlm-image-recognition", "vlm-image-processing"})
 	registerBuiltinModel("GLM-5.1", "GLM-5.1", "GLM-5.1", true, false, true, []string{"advanced-search"})
+	registerBuiltinModel("GLM-5.3-Flash", "x-preview-l", "GLM-5.3-Flash", true, false, false, []string{})
 	registerBuiltinModel("glm-4-flash", "glm-4-flash", "glm-4-flash", true, false, true, []string{"advanced-search"})
 	registerBuiltinModel("glm-4-air-250414", "glm-4-air-250414", "glm-4-air-250414", true, false, true, []string{"advanced-search"})
 	registerBuiltinModel("GLM-4.1V-Thinking-FlashX", "GLM-4.1V-Thinking-FlashX", "GLM-4.1V-Thinking-FlashX", true, false, true, []string{"advanced-search", "vlm-image-search", "vlm-image-recognition", "vlm-image-processing"})

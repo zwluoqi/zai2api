@@ -34,6 +34,7 @@ worker_push.js
 
 # Data files (contains sensitive tokens)
 /data/tokens.txt
+/data/device_id.txt
 /data/register_debug/
 /data/history/
 /data/telemetry_stats.json

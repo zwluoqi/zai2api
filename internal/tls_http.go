@@ -28,6 +28,7 @@ var (
 		"sec-ch-ua-platform", "content-type", "user-agent", "accept",
 		"origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
 		"referer", "accept-encoding", "accept-language",
+		"authorization", "cookie", "x-device-id", "x-fe-version", "x-region", "x-signature",
 	}
 )
 

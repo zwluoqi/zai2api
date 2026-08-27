@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/proto"
+	"github.com/go-rod/stealth"
 )
 
 // captcha.go 用无头浏览器复刻 z.ai 前端的阿里云验证码 2.0「无痕验证」流程，
@@ -109,6 +111,7 @@ func (g *captchaGenerator) loop() {
 			time.Sleep(1 * time.Second)
 			continue
 		}
+		LogDebug("[captcha] token 已生成，等待入池")
 		g.tokens <- tok // channel 满时阻塞，天然限流为「消费即补充」
 	}
 }
@@ -145,10 +148,18 @@ func (g *captchaGenerator) ensureBrowser() (*rod.Browser, error) {
 		}
 	}
 	l := launcher.New().Bin(bin).
-		Headless(Cfg.CaptchaHeadless).
 		Set("no-sandbox", "true").
 		Set("disable-blink-features", "AutomationControlled").
-		Set("disable-gpu", "true")
+		Set("disable-dev-shm-usage", "true").
+		Set("disable-gpu", "true").
+		Set("window-size", "1920,1080").
+		Set("lang", "zh-CN")
+	if Cfg.CaptchaHeadless {
+		// Chrome 新无头比旧 --headless 更接近真浏览器；Docker 也走这条，不依赖 xvfb。
+		l = l.Headless(true).Set("headless", "new")
+	} else {
+		l = l.Headless(false)
+	}
 
 	// 走代理（建议住宅 IP）：token 风险分在生成时按设备指纹+IP 打分，
 	// 机房 IP 会被阿里云判高风险导致 verify_failed。
@@ -194,9 +205,15 @@ func (g *captchaGenerator) ensureBrowser() (*rod.Browser, error) {
 func (g *captchaGenerator) generateOnce(browser *rod.Browser) (string, error) {
 	var page *rod.Page
 	if err := rod.Try(func() {
-		page = browser.MustPage(captchaOriginURL)
-		page.Timeout(30 * time.Second).MustWaitLoad()
-		page.MustEval(`() => { Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); }`)
+		page = stealth.MustPage(browser)
+		// 必须在 Navigate 之前注入：阿里云无痕验证在首屏就采集指纹。
+		_, _ = page.EvalOnNewDocument(captchaStealthJS)
+		_ = proto.EmulationSetUserAgentOverride{
+			UserAgent:      strings.ReplaceAll(page.MustEval(`() => navigator.userAgent`).String(), "HeadlessChrome", "Chrome"),
+			AcceptLanguage: "zh-CN,zh;q=0.9,en;q=0.8",
+		}.Call(page)
+		page.MustSetViewport(1920, 1080, 1, false)
+		page.Timeout(30 * time.Second).MustNavigate(captchaOriginURL).MustWaitLoad()
 	}); err != nil {
 		if page != nil {
 			_ = page.Close()
@@ -331,6 +348,23 @@ func (g *captchaGenerator) setupJS() string {
   setTimeout(() => resolveSetup("setup-timeout"), 14000);
 })`, captchaSDKURL, g.scene, g.region, g.prefix, captchaElementID, captchaTriggerID)
 }
+
+// captchaStealthJS 在文档创建前补一层指纹补丁（go-rod/stealth 之外）。
+// 无头 Chrome 默认带 HeadlessChrome UA / webdriver，阿里云会打成 verify_failed。
+const captchaStealthJS = `() => {
+  try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch (e) {}
+  try {
+    const ua = navigator.userAgent.replace('HeadlessChrome', 'Chrome');
+    Object.defineProperty(navigator, 'userAgent', { get: () => ua });
+  } catch (e) {}
+  try {
+    if (!window.chrome) window.chrome = { runtime: {} };
+  } catch (e) {}
+  try {
+    Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+    Object.defineProperty(navigator, 'language', { get: () => 'zh-CN' });
+  } catch (e) {}
+}`
 
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {

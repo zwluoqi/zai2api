@@ -21,6 +21,21 @@ var (
 	wafCookieTime time.Time
 )
 
+// ApplyZAICookies 写入浏览器同款 Cookie：账号 token + ESA 网关 cookie。
+func ApplyZAICookies(h fhttp.Header, token string) {
+	parts := make([]string, 0, 4)
+	if token != "" {
+		parts = append(parts, "token="+token)
+	}
+	if waf := GetWAFCookie(); waf != "" {
+		parts = append(parts, waf)
+	}
+	if len(parts) == 0 {
+		return
+	}
+	h.Set("Cookie", strings.Join(parts, "; "))
+}
+
 // GetWAFCookie 返回缓存的 WAF cookie 串（过期自动刷新，失败返回空串）。
 func GetWAFCookie() string {
 	wafCookieMu.RLock()
@@ -63,9 +78,15 @@ func refreshWAFCookie() string {
 		parts = append(parts, c.Name+"="+c.Value)
 	}
 	if len(parts) == 0 {
+		LogDebug("[WAF] warmup GET 未拿到 cookie")
 		return ""
 	}
 	v := strings.Join(parts, "; ")
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	LogDebug("[WAF] warmup cookies: %s", strings.Join(names, ","))
 	wafCookieMu.Lock()
 	wafCookieVal = v
 	wafCookieTime = time.Now()

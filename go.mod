@@ -7,6 +7,7 @@ require (
 	github.com/bogdanfinn/tls-client v1.14.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-rod/rod v0.116.2
+	github.com/go-rod/stealth v0.4.9
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 )

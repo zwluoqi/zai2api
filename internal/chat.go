@@ -16,6 +16,96 @@ import (
 	"github.com/google/uuid"
 )
 
+// reasoningEffort 对齐官网 features.reasoning_effort：思考开启时用 max（HAR 实测），关闭则 none。
+func reasoningEffort(enableThinking bool) string {
+	if enableThinking {
+		return "max"
+	}
+	return "none"
+}
+
+// createUpstreamChat 对齐官网：先 POST /api/v1/chats/new 拿到真实 chat_id，再发 completions。
+func createUpstreamChat(token, userMsgID, upstreamModel, userContent string, enableThinking, autoWebSearch bool) (string, error) {
+	ts := time.Now().UnixMilli()
+	body := map[string]interface{}{
+		"chat": map[string]interface{}{
+			"id":     "",
+			"title":  "新聊天",
+			"models": []string{upstreamModel},
+			"params": map[string]interface{}{},
+			"history": map[string]interface{}{
+				"messages": map[string]interface{}{
+					userMsgID: map[string]interface{}{
+						"id":          userMsgID,
+						"parentId":    nil,
+						"childrenIds": []string{},
+						"role":        "user",
+						"content":     userContent,
+						"timestamp":   ts / 1000,
+						"models":      []string{upstreamModel},
+					},
+				},
+				"currentId": userMsgID,
+			},
+			"tags":             []string{},
+			"flags":            []string{},
+			"features":         []map[string]interface{}{{"server": "tool_selector_h", "status": "hidden", "type": "tool_selector"}},
+			"mcp_servers":      []string{},
+			"enable_thinking":  enableThinking,
+			"reasoning_effort": reasoningEffort(enableThinking),
+			"auto_web_search":  autoWebSearch,
+			"message_version":  1,
+			"extra":            map[string]interface{}{},
+			"timestamp":        ts,
+			"type":             "default",
+		},
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	req, err := fhttp.NewRequest("POST", "https://chat.z.ai/api/v1/chats/new", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://chat.z.ai")
+	req.Header.Set("Referer", "https://chat.z.ai/")
+	req.Header.Set("X-Region", "overseas")
+	req.Header.Set("X-FE-Version", GetFeVersion())
+	req.Header.Set("X-Device-Id", GetDeviceID())
+	req.Header.Set("Accept-Language", "zh-CN")
+	ApplyZAICookies(req.Header, token)
+	ApplyBrowserFetchHeaders(req.Header, true)
+
+	client, err := TLSHTTPClient(30 * time.Second)
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status %d: %s", resp.StatusCode, string(respBody)[:min(300, len(respBody))])
+	}
+	var parsed struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", err
+	}
+	if parsed.ID == "" {
+		return "", fmt.Errorf("empty chat id")
+	}
+	LogDebug("[Upstream] chats/new ok, chat_id=%s", parsed.ID)
+	return parsed.ID, nil
+}
+
 // generateRandomIP 生成随机 IP 地址用于 X-Forwarded-For
 func generateRandomIP() string {
 	// 生成看起来合理的公网 IP
@@ -59,7 +149,7 @@ func buildUpstreamURL(apiEndpoint string, timestamp int64, requestID, userID, to
 	q.Set("hostname", "chat.z.ai")
 	q.Set("protocol", "https:")
 	q.Set("referrer", "")
-	q.Set("title", "Z.ai - Free AI Chatbot & Agent powered by GLM-5.1 & GLM-5")
+	q.Set("title", "Z.ai - Advanced AI Chatbot & Agent powered by GLM-5.3-Flash")
 	q.Set("timezone_offset", "-480")
 	q.Set("local_time", localTime)
 	q.Set("utc_time", utcTime)
@@ -221,21 +311,22 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	}
 
 	userID := payload.ID
-	chatID := uuid.New().String()
 	timestamp := time.Now().UnixMilli()
 	requestID := uuid.New().String()
 	userMsgID := uuid.New().String()
+	chatID := uuid.New().String()
 
 	// 使用新的模型映射系统
 	mapping := GetUpstreamConfig(model)
 	var targetModel string
-	var enableThinking, autoWebSearch bool
+	var enableThinking, autoWebSearch, webSearch bool
 	var mcpServers []string
 
 	if mapping != nil {
 		targetModel = mapping.UpstreamModelID
 		enableThinking = mapping.EnableThinking
 		autoWebSearch = mapping.AutoWebSearch
+		webSearch = mapping.WebSearch
 		mcpServers = mapping.MCPServers
 		LogDebug("Model mapping: %s -> %s (thinking=%v, search=%v)", model, targetModel, enableThinking, autoWebSearch)
 	} else {
@@ -243,6 +334,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		targetModel = GetTargetModel(model)
 		enableThinking = IsThinkingModel(model)
 		autoWebSearch = IsSearchModel(model)
+		webSearch = autoWebSearch
 		LogDebug("Using fallback model mapping: %s -> %s", model, targetModel)
 	}
 
@@ -268,6 +360,12 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	}
 
 	latestUserContent := extractLatestUserContent(messages)
+
+	if id, err := createUpstreamChat(token, userMsgID, targetModel, latestUserContent, enableThinking, autoWebSearch && !hasTools); err != nil {
+		LogDebug("[Upstream] chats/new failed, fallback random chat_id: %v", err)
+	} else if id != "" {
+		chatID = id
+	}
 
 	signature := GenerateSignature(userID, requestID, latestUserContent, timestamp)
 
@@ -341,7 +439,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		"extra":            map[string]interface{}{},
 		"features": map[string]interface{}{
 			"image_generation":      true,
-			"web_search":            true,
+			"web_search":            webSearch,
 			"auto_web_search":       autoWebSearch && !hasTools,
 			"preview_mode":          true,
 			"flags":                 []string{},
@@ -349,6 +447,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 			"vlm_web_search_enable": false,
 			"vlm_website_mode":      false,
 			"enable_thinking":       enableThinking,
+			"reasoning_effort":      reasoningEffort(enableThinking),
 		},
 		"variables": map[string]interface{}{
 			"{{USER_NAME}}":        "Guest",
@@ -371,6 +470,9 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	}
 	if cap := GetCaptchaVerifyParam(); cap != "" {
 		body["captcha_verify_param"] = cap
+		LogDebug("[Upstream] captcha_verify_param attached, len=%d", len(cap))
+	} else {
+		LogDebug("[Upstream] no captcha_verify_param")
 	}
 
 	if len(mcpServers) > 0 {
@@ -396,12 +498,12 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	req.Header.Set("X-FE-Version", GetFeVersion())
 	req.Header.Set("X-Signature", signature)
 	req.Header.Set("X-Region", "overseas")
+	req.Header.Set("X-Device-Id", GetDeviceID())
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))
-	if cookie := GetWAFCookie(); cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
+	req.Header.Set("Accept-Language", "zh-CN")
+	ApplyZAICookies(req.Header, token)
 	ApplyBrowserFetchHeaders(req.Header, true)
 	if Cfg.SpoofClientIP {
 		randomIP := generateRandomIP()
