@@ -24,8 +24,17 @@ func reasoningEffort(enableThinking bool) string {
 	return "none"
 }
 
+func originFromAPIEndpoint(endpoint string) string {
+	u, err := neturl.Parse(endpoint)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "https://chat.z.ai"
+	}
+	return u.Scheme + "://" + u.Host
+}
+
 // createUpstreamChat 对齐官网：先 POST /api/v1/chats/new 拿到真实 chat_id，再发 completions。
-func createUpstreamChat(token, userMsgID, upstreamModel, userContent string, enableThinking, autoWebSearch bool) (string, error) {
+// 入口与 completions 相同（生产走 Cloudflare Worker）。
+func createUpstreamChat(token, userMsgID, upstreamModel, userContent string, enableThinking, autoWebSearch bool, apiEndpoint, proxy string) (string, error) {
 	ts := time.Now().UnixMilli()
 	body := map[string]interface{}{
 		"chat": map[string]interface{}{
@@ -64,7 +73,8 @@ func createUpstreamChat(token, userMsgID, upstreamModel, userContent string, ena
 	if err != nil {
 		return "", err
 	}
-	req, err := fhttp.NewRequest("POST", "https://chat.z.ai/api/v1/chats/new", bytes.NewReader(bodyBytes))
+	newURL := originFromAPIEndpoint(apiEndpoint) + "/api/v1/chats/new"
+	req, err := fhttp.NewRequest("POST", newURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}
@@ -77,10 +87,10 @@ func createUpstreamChat(token, userMsgID, upstreamModel, userContent string, ena
 	req.Header.Set("X-FE-Version", GetFeVersion())
 	req.Header.Set("X-Device-Id", GetDeviceID())
 	req.Header.Set("Accept-Language", "zh-CN")
-	ApplyZAICookies(req.Header, token)
+	ApplyZAICookies(req.Header, token, proxy)
 	ApplyBrowserFetchHeaders(req.Header, true)
 
-	client, err := TLSHTTPClient(30 * time.Second)
+	client, err := UpstreamHTTPClient(30*time.Second, proxy)
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +112,7 @@ func createUpstreamChat(token, userMsgID, upstreamModel, userContent string, ena
 	if parsed.ID == "" {
 		return "", fmt.Errorf("empty chat id")
 	}
-	LogDebug("[Upstream] chats/new ok, chat_id=%s", parsed.ID)
+	LogDebug("[Upstream] chats/new ok, url=%s chat_id=%s", upstreamURLForLog(newURL), parsed.ID)
 	return parsed.ID, nil
 }
 
@@ -361,7 +371,14 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 
 	latestUserContent := extractLatestUserContent(messages)
 
-	if id, err := createUpstreamChat(token, userMsgID, targetModel, latestUserContent, enableThinking, autoWebSearch && !hasTools); err != nil {
+	slot := GetCaptchaSlot()
+	proxy := slot.Proxy
+	apiEndpoint := GetAPIEndpoint()
+	if GetCaptchaProxyPoolEnabled() {
+		apiEndpoint = DefaultAPIEndpoint
+		LogDebug("[Upstream] proxy pool on, direct %s via %s", apiEndpoint, redactProxyURL(proxy))
+	}
+	if id, err := createUpstreamChat(token, userMsgID, targetModel, latestUserContent, enableThinking, autoWebSearch && !hasTools, apiEndpoint, proxy); err != nil {
 		LogDebug("[Upstream] chats/new failed, fallback random chat_id: %v", err)
 	} else if id != "" {
 		chatID = id
@@ -369,7 +386,6 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 
 	signature := GenerateSignature(userID, requestID, latestUserContent, timestamp)
 
-	apiEndpoint := GetAPIEndpoint()
 	url := buildUpstreamURL(apiEndpoint, timestamp, requestID, userID, token, chatID)
 
 	urlToFileID := make(map[string]string)
@@ -378,7 +394,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	// 上传图片
 	if len(imageURLs) > 0 {
 		LogDebug("[Upstream] Uploading %d images...", len(imageURLs))
-		imageFiles, _ := UploadImages(token, imageURLs)
+		imageFiles, _ := UploadImages(token, imageURLs, proxy)
 		LogDebug("[Upstream] Image upload result: %d files", len(imageFiles))
 		for i, f := range imageFiles {
 			if i < len(imageURLs) {
@@ -403,7 +419,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	// 上传视频
 	if len(videoURLs) > 0 {
 		LogDebug("[Upstream] Uploading %d videos...", len(videoURLs))
-		videoFiles, _ := UploadVideos(token, videoURLs)
+		videoFiles, _ := UploadVideos(token, videoURLs, proxy)
 		LogDebug("[Upstream] Video upload result: %d files", len(videoFiles))
 		for i, f := range videoFiles {
 			if i < len(videoURLs) {
@@ -468,9 +484,9 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 			"tags_generation":  true,
 		},
 	}
-	if cap := GetCaptchaVerifyParam(); cap != "" {
-		body["captcha_verify_param"] = cap
-		LogDebug("[Upstream] captcha_verify_param attached, len=%d", len(cap))
+	if slot.Param != "" {
+		body["captcha_verify_param"] = slot.Param
+		LogDebug("[Upstream] captcha_verify_param attached, len=%d", len(slot.Param))
 	} else {
 		LogDebug("[Upstream] no captcha_verify_param")
 	}
@@ -503,7 +519,7 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 	req.Header.Set("Origin", "https://chat.z.ai")
 	req.Header.Set("Referer", fmt.Sprintf("https://chat.z.ai/c/%s", chatID))
 	req.Header.Set("Accept-Language", "zh-CN")
-	ApplyZAICookies(req.Header, token)
+	ApplyZAICookies(req.Header, token, proxy)
 	ApplyBrowserFetchHeaders(req.Header, true)
 	if Cfg.SpoofClientIP {
 		randomIP := generateRandomIP()
@@ -511,9 +527,9 @@ func makeUpstreamRequest(token string, messages []Message, model string, imageUR
 		req.Header.Set("X-Real-IP", randomIP)
 	}
 
-	LogDebug("Upstream request: url=%s, model=%s, messages=%d, spoof_ip=%v", upstreamURLForLog(url), targetModel, len(messages), Cfg.SpoofClientIP)
+	LogDebug("Upstream request: url=%s, model=%s, messages=%d, spoof_ip=%v proxy=%s", upstreamURLForLog(url), targetModel, len(messages), Cfg.SpoofClientIP, redactProxyURL(proxy))
 
-	client, err := TLSHTTPClient(300 * time.Second)
+	client, err := UpstreamHTTPClient(300*time.Second, proxy)
 	if err != nil {
 		return nil, "", err
 	}

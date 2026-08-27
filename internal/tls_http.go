@@ -35,6 +35,8 @@ var (
 var (
 	tlsClientMu sync.Mutex
 	tlsBySec    = map[int]tls_client.HttpClient{}
+	tlsProxyMu  sync.Mutex
+	tlsByProxy  = map[string]tls_client.HttpClient{}
 )
 
 // TLSHTTPClient 返回按超时（秒）复用的 tls-client 实例；所有出站 HTTPS 应通过此处以统一指纹。
@@ -78,6 +80,29 @@ func TLSHTTPClientWithProxy(timeout time.Duration, proxyURL string) (tls_client.
 	if err != nil {
 		return nil, fmt.Errorf("tls-client: %w", err)
 	}
+	return c, nil
+}
+
+// UpstreamHTTPClient 出站客户端：proxy 为空时复用默认指纹客户端，否则按代理缓存。
+func UpstreamHTTPClient(timeout time.Duration, proxyURL string) (tls_client.HttpClient, error) {
+	if proxyURL == "" {
+		return TLSHTTPClient(timeout)
+	}
+	sec := int(timeout.Round(time.Second) / time.Second)
+	if sec < 1 {
+		sec = 1
+	}
+	key := fmt.Sprintf("%d|%s", sec, proxyURL)
+	tlsProxyMu.Lock()
+	defer tlsProxyMu.Unlock()
+	if c, ok := tlsByProxy[key]; ok {
+		return c, nil
+	}
+	c, err := TLSHTTPClientWithProxy(timeout, proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	tlsByProxy[key] = c
 	return c, nil
 }
 

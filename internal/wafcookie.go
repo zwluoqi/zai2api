@@ -15,19 +15,23 @@ import (
 
 const wafCookieTTL = 10 * time.Minute
 
+type wafCookieEntry struct {
+	val  string
+	time time.Time
+}
+
 var (
-	wafCookieMu   sync.RWMutex
-	wafCookieVal  string
-	wafCookieTime time.Time
+	wafCookieMu  sync.RWMutex
+	wafCookieMap = map[string]wafCookieEntry{}
 )
 
 // ApplyZAICookies 写入浏览器同款 Cookie：账号 token + ESA 网关 cookie。
-func ApplyZAICookies(h fhttp.Header, token string) {
+func ApplyZAICookies(h fhttp.Header, token, proxy string) {
 	parts := make([]string, 0, 4)
 	if token != "" {
 		parts = append(parts, "token="+token)
 	}
-	if waf := GetWAFCookie(); waf != "" {
+	if waf := GetWAFCookie(proxy); waf != "" {
 		parts = append(parts, waf)
 	}
 	if len(parts) == 0 {
@@ -37,19 +41,19 @@ func ApplyZAICookies(h fhttp.Header, token string) {
 }
 
 // GetWAFCookie 返回缓存的 WAF cookie 串（过期自动刷新，失败返回空串）。
-func GetWAFCookie() string {
+func GetWAFCookie(proxy string) string {
 	wafCookieMu.RLock()
-	if wafCookieVal != "" && time.Since(wafCookieTime) < wafCookieTTL {
-		v := wafCookieVal
+	if e, ok := wafCookieMap[proxy]; ok && e.val != "" && time.Since(e.time) < wafCookieTTL {
+		v := e.val
 		wafCookieMu.RUnlock()
 		return v
 	}
 	wafCookieMu.RUnlock()
-	return refreshWAFCookie()
+	return refreshWAFCookie(proxy)
 }
 
-func refreshWAFCookie() string {
-	client, err := TLSHTTPClient(15 * time.Second)
+func refreshWAFCookie(proxy string) string {
+	client, err := UpstreamHTTPClient(15*time.Second, proxy)
 	if err != nil {
 		return ""
 	}
@@ -88,8 +92,7 @@ func refreshWAFCookie() string {
 	}
 	LogDebug("[WAF] warmup cookies: %s", strings.Join(names, ","))
 	wafCookieMu.Lock()
-	wafCookieVal = v
-	wafCookieTime = time.Now()
+	wafCookieMap[proxy] = wafCookieEntry{val: v, time: time.Now()}
 	wafCookieMu.Unlock()
 	return v
 }

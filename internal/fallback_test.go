@@ -2,6 +2,7 @@ package internal
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,38 @@ func TestBuildModelChain(t *testing.T) {
 	chain = buildModelChain("GLM-4.5")
 	if len(chain) != 2 || chain[1] != "GLM-5-Turbo" {
 		t.Fatalf("chain = %v, want [GLM-4.5 GLM-5-Turbo]", chain)
+	}
+}
+
+func TestGetActiveCaptchaProxies(t *testing.T) {
+	Cfg = &Config{
+		CaptchaBrowserProxy: "http://env:1,http://env:2",
+		CaptchaProxyPool:    []ProxyEntry{{URL: "http://pool:9", Enabled: true}, {URL: "http://off:9", Enabled: false}},
+	}
+	if got := GetActiveCaptchaProxies(); len(got) != 2 || got[0] != "http://env:1" {
+		t.Fatalf("pool off: %v", got)
+	}
+	Cfg.CaptchaProxyPoolEnabled = true
+	if got := GetActiveCaptchaProxies(); len(got) != 1 || got[0] != "http://pool:9" {
+		t.Fatalf("pool on: %v", got)
+	}
+	Cfg.CaptchaProxyPoolEnabled = false
+}
+
+func TestParseCaptchaProxyList(t *testing.T) {
+	got := parseCaptchaProxyList("http://a:1, http://b:2;\nhttp://a:1")
+	if len(got) != 2 || got[0] != "http://a:1" || got[1] != "http://b:2" {
+		t.Fatalf("got %v", got)
+	}
+	if len(parseCaptchaProxyList("")) != 0 {
+		t.Fatal("empty should be empty")
+	}
+}
+
+func TestRedactProxyURL(t *testing.T) {
+	got := redactProxyURL("http://user:secret@1.2.3.4:8080")
+	if strings.Contains(got, "secret") || !strings.Contains(got, "user") || !strings.Contains(got, "1.2.3.4:8080") {
+		t.Fatalf("got %q", got)
 	}
 }
 

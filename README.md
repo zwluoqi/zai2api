@@ -74,7 +74,7 @@ AUTH_TOKEN=your-api-key
 | `CAPTCHA_AUTO_GEN` | false | 自动生成阿里云人机验证 token（无头浏览器复刻无痕验证），z.ai v2 chat completions 现已强制要求 |
 | `CAPTCHA_HEADLESS` | true | captcha 生成器是否无头运行（VPS 无显示环境保持 true；如需更高通过率可配合 xvfb 设为 false） |
 | `CAPTCHA_BROWSER_BIN` | - | Chromium/Chrome 可执行文件路径，留空则自动探测 |
-| `CAPTCHA_BROWSER_PROXY` | - | 生成 captcha 的浏览器代理（建议住宅 IP）；机房 IP 易被阿里云判高风险致 `FRONTEND_CAPTCHA_REQUIRED` |
+| `CAPTCHA_BROWSER_PROXY` | - | 代理池关闭时 captcha 浏览器兜底代理。代理池请在管理页开关；开启后整条链路直连 chat.z.ai 并走池内代理 |
 | `CAPTCHA_POOL_SIZE` | 4 | captcha token 预热池大小（token 一次性，取用即消费） |
 | `CAPTCHA_GEN_TIMEOUT_SECONDS` | 20 | 单个 token 生成超时 |
 | `CAPTCHA_VERIFY_PARAM` | - | 手动兜底 captcha token（非空时优先，仅用于临时抓包验证） |

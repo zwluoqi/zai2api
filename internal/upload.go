@@ -234,7 +234,7 @@ func downloadFromURL(url string) (data []byte, contentType string, filename stri
 }
 
 // uploadToZAI 上传文件到 z.ai
-func uploadToZAI(token string, data []byte, filename string, contentType string) (*FileUploadResponse, error) {
+func uploadToZAI(token string, data []byte, filename string, contentType, proxy string) (*FileUploadResponse, error) {
 	LogDebug("[UploadToZAI] Preparing request: filename=%s, contentType=%s, dataSize=%d", filename, contentType, len(data))
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
@@ -285,7 +285,7 @@ func uploadToZAI(token string, data []byte, filename string, contentType string)
 		req.Header.Set("X-Real-IP", randomIP)
 	}
 
-	client, err := TLSHTTPClient(120 * time.Second)
+	client, err := UpstreamHTTPClient(120*time.Second, proxy)
 	if err != nil {
 		LogError("tls client: %v", err)
 		return nil, ErrRequestFailed
@@ -336,7 +336,7 @@ func isUnsupportedMediaURL(url string) bool {
 }
 
 // UploadMedia 通用媒体上传（支持图片和视频，支持 base64 和 URL）
-func UploadMedia(token string, mediaURL string, mediaType MediaType) (*UpstreamFile, error) {
+func UploadMedia(token string, mediaURL string, mediaType MediaType, proxy string) (*UpstreamFile, error) {
 	var fileData []byte
 	var filename string
 	var contentType string
@@ -406,7 +406,7 @@ func UploadMedia(token string, mediaURL string, mediaType MediaType) (*UpstreamF
 
 	// 上传到 z.ai
 	LogDebug("[Upload] Uploading to z.ai: filename=%s, contentType=%s, size=%d bytes", filename, contentType, len(fileData))
-	uploadResp, err := uploadToZAI(token, fileData, filename, contentType)
+	uploadResp, err := uploadToZAI(token, fileData, filename, contentType, proxy)
 	if err != nil {
 		LogDebug("[Upload] Upload to z.ai failed: %v", err)
 		return nil, err
@@ -429,21 +429,21 @@ func UploadMedia(token string, mediaURL string, mediaType MediaType) (*UpstreamF
 
 // UploadImageFromURL 从 URL 或 base64 上传图片到 z.ai
 func UploadImageFromURL(token string, imageURL string) (*UpstreamFile, error) {
-	return UploadMedia(token, imageURL, MediaTypeImage)
+	return UploadMedia(token, imageURL, MediaTypeImage, "")
 }
 
 // UploadVideoFromURL 从 URL 或 base64 上传视频到 z.ai
 func UploadVideoFromURL(token string, videoURL string) (*UpstreamFile, error) {
-	return UploadMedia(token, videoURL, MediaTypeVideo)
+	return UploadMedia(token, videoURL, MediaTypeVideo, "")
 }
 
 // UploadImages 批量上传图片
-func UploadImages(token string, imageURLs []string) ([]*UpstreamFile, error) {
+func UploadImages(token string, imageURLs []string, proxy string) ([]*UpstreamFile, error) {
 	LogDebug("[UploadImages] Starting batch upload: count=%d", len(imageURLs))
 	var files []*UpstreamFile
 	for i, url := range imageURLs {
 		LogDebug("[UploadImages] Uploading image %d/%d", i+1, len(imageURLs))
-		file, err := UploadImageFromURL(token, url)
+		file, err := UploadMedia(token, url, MediaTypeImage, proxy)
 		if err != nil {
 			LogError("upload image failed: %s - %v", url[:min(50, len(url))], err)
 			continue
@@ -460,12 +460,12 @@ func UploadImages(token string, imageURLs []string) ([]*UpstreamFile, error) {
 }
 
 // UploadVideos 批量上传视频
-func UploadVideos(token string, videoURLs []string) ([]*UpstreamFile, error) {
+func UploadVideos(token string, videoURLs []string, proxy string) ([]*UpstreamFile, error) {
 	LogDebug("[UploadVideos] Starting batch upload: count=%d", len(videoURLs))
 	var files []*UpstreamFile
 	for i, url := range videoURLs {
 		LogDebug("[UploadVideos] Uploading video %d/%d", i+1, len(videoURLs))
-		file, err := UploadVideoFromURL(token, url)
+		file, err := UploadMedia(token, url, MediaTypeVideo, proxy)
 		if err != nil {
 			LogError("upload video failed: %s - %v", url[:min(50, len(url))], err)
 			continue
@@ -483,7 +483,7 @@ func UploadVideos(token string, videoURLs []string) ([]*UpstreamFile, error) {
 
 // UploadMediaFiles 批量上传媒体文件（图片+视频）
 func UploadMediaFiles(token string, imageURLs, videoURLs []string) ([]*UpstreamFile, []*UpstreamFile, error) {
-	images, _ := UploadImages(token, imageURLs)
-	videos, _ := UploadVideos(token, videoURLs)
+	images, _ := UploadImages(token, imageURLs, "")
+	videos, _ := UploadVideos(token, videoURLs, "")
 	return images, videos, nil
 }

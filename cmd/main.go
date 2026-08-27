@@ -109,6 +109,10 @@ func main() {
 	http.HandleFunc("/admin/api/endpoints", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminEndpoints))))
 	http.HandleFunc("/admin/api/history", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminHistory))))
 	http.HandleFunc("/admin/api/settings", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminSettings))))
+	http.HandleFunc("/admin/api/proxies", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminProxies))))
+	http.HandleFunc("/admin/api/proxies/delete", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminProxyDelete))))
+	http.HandleFunc("/admin/api/proxies/toggle", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminProxyToggle))))
+	http.HandleFunc("/admin/api/proxies/check", corsMiddleware(loggingMiddleware(internal.RequireAdmin(internal.HandleAdminProxyCheck))))
 	addr := ":" + internal.Cfg.Port
 	internal.LogInfo("Server starting on %s", addr)
 	internal.LogInfo("API docs available at http://localhost:%s/v1/models", internal.Cfg.Port)

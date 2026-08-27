@@ -55,7 +55,9 @@ type Config struct {
 	CaptchaAutoGen           bool
 	CaptchaHeadless          bool
 	CaptchaBrowserBin        string
-	CaptchaBrowserProxy      string // 生成 captcha 的浏览器走此代理（建议住宅 IP，规避阿里云对机房 IP 的风控）
+	CaptchaBrowserProxy      string // 环境变量兜底：代理池关闭时仅 captcha 浏览器使用
+	CaptchaProxyPoolEnabled  bool   // 管理页可热更新：开启后整条链路直连 chat.z.ai 并走代理池
+	CaptchaProxyPool         []ProxyEntry
 	CaptchaPoolSize          int
 	CaptchaGenTimeoutSeconds int
 	CaptchaSceneID           string
@@ -75,8 +77,22 @@ type runtimeFileConfig struct {
 		Endpoints []string `json:"endpoints"`
 	} `json:"api"`
 	// 可在管理面板「系统设置」中编辑并持久化到 config.json 的运行时设置
-	RetryCount     *int     `json:"retry_count"`
-	ModelFallbacks []string `json:"model_fallbacks"`
+	RetryCount              *int            `json:"retry_count"`
+	ModelFallbacks          []string        `json:"model_fallbacks"`
+	CaptchaProxyPoolEnabled *bool           `json:"captcha_proxy_pool_enabled"`
+	CaptchaProxyPool        json.RawMessage `json:"captcha_proxy_pool"`
+}
+
+type ProxyEntry struct {
+	URL       string `json:"url"`
+	Enabled   bool   `json:"enabled"`
+	ExitIP    string `json:"exit_ip,omitempty"`
+	Region    string `json:"region,omitempty"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+	Success   int64  `json:"success,omitempty"`
+	Fail      int64  `json:"fail,omitempty"`
+	LastCheck int64  `json:"last_check,omitempty"`
+	LastError string `json:"last_error,omitempty"`
 }
 
 // settingsMu 保护可在运行时（管理面板）热更新的设置字段：RetryCount、ModelFallbacks
@@ -245,6 +261,8 @@ func LoadConfig() {
 		CaptchaHeadless:          getEnvBool("CAPTCHA_HEADLESS", true),
 		CaptchaBrowserBin:        getEnvString("CAPTCHA_BROWSER_BIN", ""),
 		CaptchaBrowserProxy:      getEnvString("CAPTCHA_BROWSER_PROXY", ""),
+		CaptchaProxyPoolEnabled:  false,
+		CaptchaProxyPool:         nil,
 		CaptchaPoolSize:          getEnvInt("CAPTCHA_POOL_SIZE", 4),
 		CaptchaGenTimeoutSeconds: getEnvInt("CAPTCHA_GEN_TIMEOUT_SECONDS", 20),
 		CaptchaSceneID:           getEnvString("CAPTCHA_SCENE_ID", ""),
@@ -258,6 +276,12 @@ func LoadConfig() {
 	}
 	if fileCfg.ModelFallbacks != nil {
 		Cfg.ModelFallbacks = fileCfg.ModelFallbacks
+	}
+	if fileCfg.CaptchaProxyPoolEnabled != nil {
+		Cfg.CaptchaProxyPoolEnabled = *fileCfg.CaptchaProxyPoolEnabled
+	}
+	if len(fileCfg.CaptchaProxyPool) > 0 {
+		Cfg.CaptchaProxyPool = decodeProxyPoolJSON(fileCfg.CaptchaProxyPool)
 	}
 }
 
@@ -284,29 +308,118 @@ func GetModelFallbacks() []string {
 	return append([]string(nil), Cfg.ModelFallbacks...)
 }
 
+func GetCaptchaProxyPoolEnabled() bool {
+	settingsMu.RLock()
+	defer settingsMu.RUnlock()
+	return Cfg != nil && Cfg.CaptchaProxyPoolEnabled
+}
+
+func GetCaptchaProxyEntries() []ProxyEntry {
+	settingsMu.RLock()
+	defer settingsMu.RUnlock()
+	if Cfg == nil {
+		return nil
+	}
+	return append([]ProxyEntry(nil), Cfg.CaptchaProxyPool...)
+}
+
+func enabledProxyURLsLocked() []string {
+	if Cfg == nil {
+		return nil
+	}
+	out := make([]string, 0, len(Cfg.CaptchaProxyPool))
+	for _, e := range Cfg.CaptchaProxyPool {
+		if e.Enabled && e.URL != "" {
+			out = append(out, e.URL)
+		}
+	}
+	return out
+}
+
+// GetActiveCaptchaProxies 当前用于出站的代理列表。
+// 代理池开启时只用已启用的条目；关闭时回退到环境变量 CAPTCHA_BROWSER_PROXY。
+func GetActiveCaptchaProxies() []string {
+	settingsMu.RLock()
+	defer settingsMu.RUnlock()
+	if Cfg != nil && Cfg.CaptchaProxyPoolEnabled {
+		return enabledProxyURLsLocked()
+	}
+	if Cfg == nil {
+		return nil
+	}
+	return parseCaptchaProxyList(Cfg.CaptchaBrowserProxy)
+}
+
+func decodeProxyPoolJSON(raw json.RawMessage) []ProxyEntry {
+	if len(raw) == 0 {
+		return nil
+	}
+	var entries []ProxyEntry
+	if err := json.Unmarshal(raw, &entries); err == nil && (len(entries) == 0 || entries[0].URL != "") {
+		out := make([]ProxyEntry, 0, len(entries))
+		seen := map[string]bool{}
+		for _, e := range entries {
+			e.URL = strings.TrimSpace(e.URL)
+			if e.URL == "" || seen[e.URL] {
+				continue
+			}
+			seen[e.URL] = true
+			out = append(out, e)
+		}
+		return out
+	}
+	var strs []string
+	if err := json.Unmarshal(raw, &strs); err == nil {
+		out := make([]ProxyEntry, 0, len(strs))
+		for _, u := range normalizeProxyList(strs) {
+			out = append(out, ProxyEntry{URL: u, Enabled: true})
+		}
+		return out
+	}
+	return nil
+}
+
+type RuntimeSettingsPatch struct {
+	RetryCount              *int
+	ModelFallbacks          *[]string
+	CaptchaProxyPoolEnabled *bool
+}
+
 // UpdateRuntimeSettings 热更新可编辑的运行时设置并持久化到 config.json。
-// 传 nil 表示不改动对应项。
-func UpdateRuntimeSettings(retryCount *int, modelFallbacks []string, updateFallbacks bool) error {
+// 指针为 nil 表示不改动对应项。
+func UpdateRuntimeSettings(p RuntimeSettingsPatch) error {
 	settingsMu.Lock()
-	if retryCount != nil {
-		rc := *retryCount
+	if p.RetryCount != nil {
+		rc := *p.RetryCount
 		if rc < 0 {
 			rc = 0
 		}
 		Cfg.RetryCount = rc
 	}
-	if updateFallbacks {
-		Cfg.ModelFallbacks = modelFallbacks
+	if p.ModelFallbacks != nil {
+		Cfg.ModelFallbacks = *p.ModelFallbacks
 	}
-	rc := Cfg.RetryCount
-	fb := append([]string(nil), Cfg.ModelFallbacks...)
+	if p.CaptchaProxyPoolEnabled != nil {
+		Cfg.CaptchaProxyPoolEnabled = *p.CaptchaProxyPoolEnabled
+	}
+	retryCount := Cfg.RetryCount
+	fallbacks := append([]string(nil), Cfg.ModelFallbacks...)
+	poolOn := Cfg.CaptchaProxyPoolEnabled
+	pool := append([]ProxyEntry(nil), Cfg.CaptchaProxyPool...)
 	path := Cfg.ConfigPath
 	settingsMu.Unlock()
-	return writeConfigSettings(path, rc, fb)
+	LogInfo("运行时设置已更新: retry_count=%d fallbacks=%d proxy_pool=%v proxies=%d", retryCount, len(fallbacks), poolOn, len(pool))
+	return writeConfigSettings(path, retryCount, fallbacks, poolOn, pool)
 }
 
-// writeConfigSettings 将运行时设置合并写入 config.json（保留其他配置段）。
-func writeConfigSettings(path string, retryCount int, fallbacks []string) error {
+func persistProxyPoolLocked() error {
+	if Cfg == nil {
+		return nil
+	}
+	return writeConfigSettings(Cfg.ConfigPath, Cfg.RetryCount, append([]string(nil), Cfg.ModelFallbacks...), Cfg.CaptchaProxyPoolEnabled, append([]ProxyEntry(nil), Cfg.CaptchaProxyPool...))
+}
+
+func writeConfigSettings(path string, retryCount int, fallbacks []string, poolOn bool, pool []ProxyEntry) error {
 	if path == "" {
 		return nil
 	}
@@ -323,6 +436,11 @@ func writeConfigSettings(path string, retryCount int, fallbacks []string) error 
 		fallbacks = []string{}
 	}
 	root["model_fallbacks"] = fallbacks
+	root["captcha_proxy_pool_enabled"] = poolOn
+	if pool == nil {
+		pool = []ProxyEntry{}
+	}
+	root["captcha_proxy_pool"] = pool
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return err
@@ -331,16 +449,28 @@ func writeConfigSettings(path string, retryCount int, fallbacks []string) error 
 	return os.WriteFile(path, data, 0644)
 }
 
-// GetCaptchaVerifyParam 返回一个阿里云人机验证 token：优先手动配置（CAPTCHA_VERIFY_PARAM），
-// 否则从自动生成池取用一个新鲜的一次性 token；都没有则返回空。
-func GetCaptchaVerifyParam() string {
-	if Cfg == nil {
-		return ""
+type CaptchaSlot struct {
+	Param string
+	Proxy string
+}
+
+// GetCaptchaSlot 取一个 captcha token，以及（代理池开启时）与之绑定的出口代理。
+func GetCaptchaSlot() CaptchaSlot {
+	slot := CaptchaSlot{}
+	if Cfg != nil && Cfg.CaptchaVerifyParam != "" {
+		slot.Param = Cfg.CaptchaVerifyParam
+	} else {
+		slot = getCaptchaFromPool()
 	}
-	if Cfg.CaptchaVerifyParam != "" {
-		return Cfg.CaptchaVerifyParam
+	if GetCaptchaProxyPoolEnabled() && slot.Proxy == "" {
+		if pool := GetActiveCaptchaProxies(); len(pool) > 0 {
+			slot.Proxy = pool[0]
+		}
 	}
-	return getCaptchaFromPool()
+	if !GetCaptchaProxyPoolEnabled() {
+		slot.Proxy = ""
+	}
+	return slot
 }
 
 func loadRuntimeFileConfig(path string) runtimeFileConfig {

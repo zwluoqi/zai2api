@@ -39,11 +39,13 @@ const (
 )
 
 type captchaGenerator struct {
-	tokens chan string
+	tokens chan CaptchaSlot
 
-	mu          sync.Mutex
-	browser     *rod.Browser
-	proxyExtDir string // 代理鉴权扩展临时目录（浏览器销毁时清理）
+	mu           sync.Mutex
+	browser      *rod.Browser
+	proxyExtDir  string // 代理鉴权扩展临时目录（浏览器销毁时清理）
+	proxyIndex   int
+	currentProxy string
 
 	scene   string
 	prefix  string
@@ -69,7 +71,7 @@ func StartCaptchaGenerator() {
 		if size > 16 {
 			size = 16
 		}
-		captchaGen.tokens = make(chan string, size)
+		captchaGen.tokens = make(chan CaptchaSlot, size)
 		captchaGen.scene = firstNonEmpty(Cfg.CaptchaSceneID, captchaDefaultScene)
 		captchaGen.prefix = firstNonEmpty(Cfg.CaptchaPrefix, captchaDefaultPfx)
 		captchaGen.region = firstNonEmpty(Cfg.CaptchaRegion, captchaDefaultRegn)
@@ -79,65 +81,83 @@ func StartCaptchaGenerator() {
 		}
 		captchaGen.started = true
 		go captchaGen.loop()
-		LogInfo("captcha 生成器已启动: scene=%s prefix=%s region=%s pool=%d headless=%v",
-			captchaGen.scene, captchaGen.prefix, captchaGen.region, size, Cfg.CaptchaHeadless)
+		LogInfo("captcha 生成器已启动: scene=%s prefix=%s region=%s pool=%d headless=%v proxies=%d",
+			captchaGen.scene, captchaGen.prefix, captchaGen.region, size, Cfg.CaptchaHeadless, len(GetActiveCaptchaProxies()))
 	})
 }
 
 // getCaptchaFromPool 供 GetCaptchaVerifyParam 调用：非阻塞地尽量取一个预热 token，
 // 池暂空时短暂等待一个新鲜 token；仍取不到则返回空（调用方决定是否照发）。
-func getCaptchaFromPool() string {
+func getCaptchaFromPool() CaptchaSlot {
 	if captchaGen == nil || !captchaGen.started {
-		return ""
+		return CaptchaSlot{}
 	}
 	select {
 	case tok := <-captchaGen.tokens:
 		return tok
 	case <-time.After(captchaGen.timeout + 5*time.Second):
 		LogError("[captcha] 池取用超时，本次请求不携带 captcha_verify_param")
-		return ""
+		return CaptchaSlot{}
 	}
 }
 
 func (g *captchaGenerator) loop() {
 	for {
-		tok, err := g.generateWithRecovery()
+		slot, err := g.generateWithRecovery()
 		if err != nil {
 			LogError("[captcha] 生成失败: %v", err)
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		if tok == "" {
+		if slot.Param == "" {
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		LogDebug("[captcha] token 已生成，等待入池")
-		g.tokens <- tok // channel 满时阻塞，天然限流为「消费即补充」
+		LogDebug("[captcha] token 已生成，等待入池 proxy=%s", redactProxyURL(slot.Proxy))
+		g.tokens <- slot // channel 满时阻塞，天然限流为「消费即补充」
 	}
 }
 
 // generateWithRecovery 确保浏览器就绪后生成一个 token。
-// 每个 token 用一个全新页面（同页面重复验证不可靠：SDK 一个实例只完成一次验证循环），
-// 浏览器进程常驻复用；浏览器异常时销毁并在下一轮重建。
-func (g *captchaGenerator) generateWithRecovery() (string, error) {
-	browser, err := g.ensureBrowser()
-	if err != nil {
-		return "", fmt.Errorf("准备浏览器: %w", err)
-	}
-	tok, err := g.generateOnce(browser)
+// 每个 token 用一个全新页面（同页面重复验证不可靠：SDK 一个实例只完成一次验证循环）。
+// 单代理时浏览器进程常驻复用；代理池大于 1 时每个 token 换一个出口并重建浏览器。
+func (g *captchaGenerator) generateWithRecovery() (CaptchaSlot, error) {
+	g.mu.Lock()
+	proxy := g.nextProxyLocked()
+	g.mu.Unlock()
+
+	browser, err := g.ensureBrowser(proxy)
 	if err != nil {
 		g.teardown()
-		return "", err
+		return CaptchaSlot{}, fmt.Errorf("准备浏览器: %w", err)
 	}
-	return tok, nil
+	tok, err := g.generateOnce(browser)
+	if err != nil || len(GetActiveCaptchaProxies()) > 1 {
+		g.teardown()
+	}
+	if err != nil {
+		return CaptchaSlot{}, err
+	}
+	return CaptchaSlot{Param: tok, Proxy: proxy}, nil
 }
 
-func (g *captchaGenerator) ensureBrowser() (*rod.Browser, error) {
+func (g *captchaGenerator) nextProxyLocked() string {
+	proxies := GetActiveCaptchaProxies()
+	if len(proxies) == 0 {
+		return ""
+	}
+	p := proxies[g.proxyIndex%len(proxies)]
+	g.proxyIndex++
+	return p
+}
+
+func (g *captchaGenerator) ensureBrowser(proxy string) (*rod.Browser, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.browser != nil {
+	if g.browser != nil && g.currentProxy == proxy {
 		return g.browser, nil
 	}
+	g.teardownLocked()
 
 	bin := Cfg.CaptchaBrowserBin
 	if bin == "" {
@@ -163,7 +183,7 @@ func (g *captchaGenerator) ensureBrowser() (*rod.Browser, error) {
 
 	// 走代理（建议住宅 IP）：token 风险分在生成时按设备指纹+IP 打分，
 	// 机房 IP 会被阿里云判高风险导致 verify_failed。
-	if proxy := Cfg.CaptchaBrowserProxy; proxy != "" {
+	if proxy != "" {
 		server, extDir, err := configureCaptchaProxy(proxy)
 		if err != nil {
 			return nil, fmt.Errorf("配置 captcha 代理: %w", err)
@@ -175,7 +195,7 @@ func (g *captchaGenerator) ensureBrowser() (*rod.Browser, error) {
 			l = l.Set("disable-extensions-except", extDir).Set("load-extension", extDir)
 			g.proxyExtDir = extDir
 		}
-		LogInfo("captcha 生成器使用代理: %s", server)
+		LogDebug("[captcha] 使用代理 %s", redactProxyURL(proxy))
 	}
 
 	u, err := l.Launch()
@@ -198,6 +218,7 @@ func (g *captchaGenerator) ensureBrowser() (*rod.Browser, error) {
 	}
 
 	g.browser = browser
+	g.currentProxy = proxy
 	return browser, nil
 }
 
@@ -244,14 +265,62 @@ func (g *captchaGenerator) generateOnce(browser *rod.Browser) (string, error) {
 func (g *captchaGenerator) teardown() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.teardownLocked()
+}
+
+func (g *captchaGenerator) teardownLocked() {
 	if g.browser != nil {
 		_ = g.browser.Close()
 	}
 	g.browser = nil
+	g.currentProxy = ""
 	if g.proxyExtDir != "" {
 		_ = os.RemoveAll(g.proxyExtDir)
 		g.proxyExtDir = ""
 	}
+}
+
+func parseCaptchaProxyList(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ';' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+func normalizeProxyList(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	return parseCaptchaProxyList(strings.Join(in, "\n"))
+}
+
+func redactProxyURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	if u.User != nil {
+		user := u.User.Username()
+		if _, hasPass := u.User.Password(); hasPass {
+			u.User = url.UserPassword(user, "***")
+		} else {
+			u.User = url.User(user)
+		}
+	}
+	return u.String()
 }
 
 // configureCaptchaProxy 解析代理地址，返回 proxy-server 值及（含账号密码时）鉴权扩展目录。

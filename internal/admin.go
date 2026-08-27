@@ -60,6 +60,24 @@ const adminHTML = `<!doctype html>
     .badge.success{background:#dcfae6;color:#067647}
     .badge.failed{background:#fee4e2;color:#b42318}
     .badge.running{background:#fef0c7;color:#b54708}
+    .badge.healthy{background:#d1fae5;color:#047857}
+    .badge.disabled{background:#e5e7eb;color:#4b5563}
+    .badge.error{background:#fee2e2;color:#b91c1c}
+    .proxy-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+    .proxy-head h2{margin:0}
+    .proxy-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+    .proxy-stat{background:#f8fafc;border:1px solid #ebeff5;border-radius:10px;padding:14px}
+    .proxy-stat span{color:#667085;font-size:13px}
+    .proxy-stat b{display:block;font-size:28px;margin-top:6px}
+    .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#12b76a;margin-right:6px}
+    .btn-danger{color:#b42318;border-color:#fecdca}
+    .btn-danger:hover{background:#fef3f2}
+    .modal-mask{position:fixed;inset:0;background:rgba(16,24,40,.45);display:none;align-items:center;justify-content:center;z-index:20}
+    .modal-mask.show{display:flex}
+    .modal-card{background:#fff;border-radius:12px;padding:18px;width:min(560px,92vw);box-shadow:0 20px 50px rgba(16,24,40,.18)}
+    .ops button{margin-right:4px}
+    .proxy-url{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
+    @media (max-width:900px){.proxy-stats{grid-template-columns:1fr 1fr}}
     .detail-empty{height:100%;display:flex;align-items:center;justify-content:center;color:#667085}
     .detail-body{padding:14px}
     .message{border:1px solid #e0e5ee;border-radius:8px;margin:0 0 12px;background:#fff}
@@ -82,6 +100,7 @@ const adminHTML = `<!doctype html>
     <div class="brand">zai2api Admin</div>
     <button id="navAccount" class="active" onclick="showView('account')">账号管理</button>
     <button id="navHistory" onclick="showView('history')">聊天记录</button>
+    <button id="navProxies" onclick="showView('proxies')">代理池</button>
     <button id="navSettings" onclick="showView('settings')">系统设置</button>
   </aside>
   <main class="content">
@@ -126,6 +145,29 @@ const adminHTML = `<!doctype html>
         <div class="history-detail" id="historyDetail"><div class="detail-empty">选择一条聊天记录</div></div>
       </div>
     </div>
+    <div id="viewProxies" class="view">
+      <div class="proxy-head">
+        <h2>代理池</h2>
+        <div class="row">
+          <button id="btnPoolToggle" onclick="toggleProxyPool()">停用代理池</button>
+          <button onclick="checkAllProxies()">检测全部</button>
+          <button class="primary" onclick="openProxyModal()">+ 添加代理</button>
+        </div>
+      </div>
+      <p class="muted" style="margin-top:0">开启后整条链路直连 chat.z.ai 并走对应代理，不再走 Cloudflare Worker。可一次粘贴多个地址。</p>
+      <div class="proxy-stats">
+        <div class="proxy-stat"><span>代理总数</span><b id="proxyTotal">0</b></div>
+        <div class="proxy-stat"><span>已启用</span><b id="proxyActive">0</b></div>
+        <div class="proxy-stat"><span>健康</span><b id="proxyHealthy">0</b></div>
+        <div class="proxy-stat"><span>代理池轮换</span><b id="proxyRotate"><span class="dot"></span>关闭</b></div>
+      </div>
+      <section style="padding:0;overflow:auto">
+        <table>
+          <thead><tr><th>代理地址</th><th>状态</th><th>出口IP</th><th>地区</th><th>延迟</th><th>成功/失败</th><th>最近检测</th><th>操作</th></tr></thead>
+          <tbody id="proxyRows"></tbody>
+        </table>
+      </section>
+    </div>
     <div id="viewSettings" class="view">
       <section>
         <h2>系统设置</h2>
@@ -137,6 +179,17 @@ const adminHTML = `<!doctype html>
         </div>
         <pre id="settings"></pre>
       </section>
+    </div>
+    <div id="proxyModal" class="modal-mask" onclick="if(event.target===this)closeProxyModal()">
+      <div class="modal-card">
+        <h2>添加代理</h2>
+        <p class="muted">每行一个，或用逗号分隔，可一次添加多个。</p>
+        <p><textarea id="proxyAddText" placeholder="http://user:pass@host:port"></textarea></p>
+        <div class="row">
+          <button class="primary" onclick="submitAddProxies()">添加</button>
+          <button onclick="closeProxyModal()">取消</button>
+        </div>
+      </div>
     </div>
   </main>
 </div>
@@ -159,12 +212,13 @@ async function api(path, opts={}) {
 }
 function showView(name){
   currentView = name;
-  for (const v of ['account','history','settings']) {
+  for (const v of ['account','history','proxies','settings']) {
     document.getElementById('view'+cap(v)).classList.toggle('active', v === name);
     document.getElementById('nav'+cap(v)).classList.toggle('active', v === name);
   }
   if (name === 'account') loadAccount();
   if (name === 'history') loadHistory();
+  if (name === 'proxies') loadProxies();
   if (name === 'settings') loadSettings();
 }
 function cap(s){return s.charAt(0).toUpperCase()+s.slice(1)}
@@ -215,6 +269,63 @@ async function saveSettings(){
     msg.textContent = '已保存 ✓';
   } catch(e) { msg.textContent = '保存失败: ' + e.message; }
   loadSettings();
+}
+function fmtTime(ts){
+  if(!ts) return '-';
+  const d = new Date(ts*1000);
+  return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0');
+}
+function proxyStatusHtml(p){
+  let html = '';
+  if (p.exit_ip && !p.last_error) html += '<span class="badge healthy">健康</span> ';
+  else if (p.last_error) html += '<span class="badge error" title="'+escapeHtml(p.last_error)+'">异常</span> ';
+  if (!p.enabled) html += '<span class="badge disabled">禁用</span>';
+  return html || '<span class="muted">未检测</span>';
+}
+async function loadProxies(){
+  const data = await api('/admin/api/proxies');
+  proxyTotal.textContent = data.stats.total;
+  proxyActive.textContent = data.stats.active;
+  proxyHealthy.textContent = data.stats.healthy;
+  proxyRotate.innerHTML = data.enabled ? '<span class="dot"></span>开启' : '<span class="dot" style="background:#98a2b3"></span>关闭';
+  const btn = document.getElementById('btnPoolToggle');
+  btn.textContent = data.enabled ? '停用代理池' : '启用代理池';
+  proxyRows.innerHTML = (data.items||[]).map(p => {
+    const arg = JSON.stringify(p.url).replace(/"/g,'&quot;');
+    const lat = p.latency_ms ? p.latency_ms+' ms' : '-';
+    const toggle = p.enabled ? '<button onclick="toggleProxy('+arg+',false)">停用</button>' : '<button onclick="toggleProxy('+arg+',true)">启用</button>';
+    return '<tr><td class="proxy-url">'+escapeHtml(p.url)+'</td><td>'+proxyStatusHtml(p)+'</td><td>'+escapeHtml(p.exit_ip||'-')+'</td><td>'+escapeHtml(p.region||'-')+'</td><td>'+lat+'</td><td>'+(p.success||0)+' / '+(p.fail||0)+'</td><td>'+fmtTime(p.last_check)+'</td><td class="ops"><button onclick="checkProxy(this,'+arg+')">检测</button> '+toggle+' <button class="btn-danger" onclick="deleteProxy('+arg+')">删除</button></td></tr>';
+  }).join('');
+}
+function openProxyModal(){ proxyModal.classList.add('show'); proxyAddText.focus(); }
+function closeProxyModal(){ proxyModal.classList.remove('show'); }
+async function submitAddProxies(){
+  const urls = proxyAddText.value.split(/[\n,;]+/).map(x=>x.trim()).filter(Boolean);
+  if(!urls.length) return;
+  await api('/admin/api/proxies',{method:'POST',body:JSON.stringify({urls})});
+  proxyAddText.value='';
+  closeProxyModal();
+  loadProxies();
+}
+async function deleteProxy(url){ if(!confirm('删除 '+url+' ?')) return; await api('/admin/api/proxies/delete',{method:'POST',body:JSON.stringify({url})}); loadProxies(); }
+async function toggleProxy(url, enabled){ await api('/admin/api/proxies/toggle',{method:'POST',body:JSON.stringify({url,enabled})}); loadProxies(); }
+async function toggleProxyPool(){
+  const on = document.getElementById('btnPoolToggle').textContent.indexOf('启用')>=0;
+  await api('/admin/api/proxies/toggle',{method:'POST',body:JSON.stringify({pool:on})});
+  loadProxies();
+}
+async function checkProxy(btn, url){
+  const old = btn.textContent;
+  btn.textContent='检测中';
+  btn.classList.add('testing');
+  try { await api('/admin/api/proxies/check',{method:'POST',body:JSON.stringify({url})}); }
+  finally { btn.textContent=old; btn.classList.remove('testing'); loadProxies(); }
+}
+async function checkAllProxies(){
+  const btn = event && event.target;
+  if(btn){ btn.classList.add('testing'); btn.textContent='检测中'; }
+  try { await api('/admin/api/proxies/check',{method:'POST',body:JSON.stringify({all:true})}); }
+  finally { if(btn){ btn.classList.remove('testing'); btn.textContent='检测全部'; } loadProxies(); }
 }
 async function addToken(){ await api('/admin/api/tokens',{method:'POST',body:JSON.stringify({token:newToken.value})}); newToken.value=''; loadAccount(); }
 async function addEndpoint(){ const endpoint = newEndpoint.value.trim(); if(!endpoint) return; await api('/admin/api/endpoints',{method:'POST',body:JSON.stringify({endpoint})}); newEndpoint.value=''; loadAccount(); }
@@ -541,16 +652,20 @@ func parsePositiveInt(value string, fallback int) int {
 func HandleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var req struct {
-			RetryCount     *int      `json:"retry_count"`
-			ModelFallbacks *[]string `json:"model_fallbacks"`
+			RetryCount              *int      `json:"retry_count"`
+			ModelFallbacks          *[]string `json:"model_fallbacks"`
+			CaptchaProxyPoolEnabled *bool     `json:"captcha_proxy_pool_enabled"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		var fallbacks []string
-		updateFallbacks := req.ModelFallbacks != nil
-		if updateFallbacks {
+		patch := RuntimeSettingsPatch{
+			RetryCount:              req.RetryCount,
+			CaptchaProxyPoolEnabled: req.CaptchaProxyPoolEnabled,
+		}
+		if req.ModelFallbacks != nil {
+			var fallbacks []string
 			for _, m := range *req.ModelFallbacks {
 				m = strings.TrimSpace(m)
 				if m == "" {
@@ -562,8 +677,9 @@ func HandleAdminSettings(w http.ResponseWriter, r *http.Request) {
 				}
 				fallbacks = append(fallbacks, m)
 			}
+			patch.ModelFallbacks = &fallbacks
 		}
-		if err := UpdateRuntimeSettings(req.RetryCount, fallbacks, updateFallbacks); err != nil {
+		if err := UpdateRuntimeSettings(patch); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -572,21 +688,23 @@ func HandleAdminSettings(w http.ResponseWriter, r *http.Request) {
 
 	endpoints := GetAPIEndpoints()
 	writeJSON(w, map[string]any{
-		"port":            Cfg.Port,
-		"config_path":     Cfg.ConfigPath,
-		"api_endpoint":    endpoints[0],
-		"api_endpoints":   endpoints,
-		"auth_tokens":     len(Cfg.AuthTokens),
-		"backup_tokens":   len(Cfg.BackupTokens),
-		"debug_logging":   Cfg.DebugLogging,
-		"tool_support":    Cfg.ToolSupport,
-		"retry_count":     GetRetryCount(),
-		"model_fallbacks": GetModelFallbacks(),
-		"skip_auth_token": Cfg.SkipAuthToken,
-		"scan_limit":      Cfg.ScanLimit,
-		"log_level":       Cfg.LogLevel,
-		"spoof_client_ip": Cfg.SpoofClientIP,
-		"admin_token_set": Cfg.AdminToken != "",
+		"port":                       Cfg.Port,
+		"config_path":                Cfg.ConfigPath,
+		"api_endpoint":               endpoints[0],
+		"api_endpoints":              endpoints,
+		"auth_tokens":                len(Cfg.AuthTokens),
+		"backup_tokens":              len(Cfg.BackupTokens),
+		"debug_logging":              Cfg.DebugLogging,
+		"tool_support":               Cfg.ToolSupport,
+		"retry_count":                GetRetryCount(),
+		"model_fallbacks":            GetModelFallbacks(),
+		"captcha_proxy_pool_enabled": GetCaptchaProxyPoolEnabled(),
+		"captcha_auto_gen":           Cfg.CaptchaAutoGen,
+		"skip_auth_token":            Cfg.SkipAuthToken,
+		"scan_limit":                 Cfg.ScanLimit,
+		"log_level":                  Cfg.LogLevel,
+		"spoof_client_ip":            Cfg.SpoofClientIP,
+		"admin_token_set":            Cfg.AdminToken != "",
 		"env": map[string]string{
 			"ZAI_BROWSER":        os.Getenv("ZAI_BROWSER"),
 			"ADSPOWER_API_URL":   os.Getenv("ADSPOWER_API_URL"),
